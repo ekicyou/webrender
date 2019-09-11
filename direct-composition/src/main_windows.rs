@@ -1,12 +1,13 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+// 機能理解のため、ソースコードに詳細コメントする。
 
-extern crate direct_composition;
-extern crate euclid;
-extern crate gleam;
-extern crate webrender;
-extern crate winit;
+extern crate direct_composition;    //  このコンポーネント
+extern crate euclid;                //  ユークリッド座標系管理
+extern crate gleam;                 //  OpenGLラッパー
+extern crate webrender;             //  2D描画ライブラリ
+extern crate winit;                 //  ウィンドウ管理
 
 use euclid::size2;
 use direct_composition::DirectComposition;
@@ -15,22 +16,31 @@ use webrender::api;
 use winit::os::windows::{WindowExt, WindowBuilderExt};
 use winit::dpi::LogicalSize;
 
+// メインルーチン
 fn main() {
+    //  イベントループ
     let mut events_loop = winit::EventsLoop::new();
 
+    //  チャンネル作成（tx:送信側, rx:受信側）
+    //  描画可能通知を中継する。
+    //      tx：イベントループの描画可能イベント通知[new_frame_ready/wake_up]に接続
+    //      rx：renderに渡す。renderスレッドにて描画可能を待機するのに使う。
     let (tx, rx) = mpsc::channel();
     let notifier = Box::new(Notifier { events_proxy: events_loop.create_proxy(), tx });
 
+    //  ウィンドウ作成
     let window = winit::WindowBuilder::new()
         .with_title("WebRender + ANGLE + DirectComposition")
         .with_dimensions(LogicalSize::new(1024., 768.))
         .with_decorations(true)
-        .with_transparency(true)
-        .with_no_redirection_bitmap(true)
+        .with_transparency(true)            //  透明
+        .with_no_redirection_bitmap(true)   //  GDIを描画しない。
         .build(&events_loop)
         .unwrap();
 
+    //  Direct Composition,Angleを使ったOpenGLをウィンドウに適用して初期化
     let composition = direct_composition_from_window(&window);
+    //  DPIを取得
     let factor = window.get_hidpi_factor() as f32;
 
     let mut clicks: usize = 0;
