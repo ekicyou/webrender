@@ -146,6 +146,7 @@ impl DirectComposition {
 }
 
 /// A DirectComposition "visual" configured for rendering with Direct3D.
+/// GL描画ターゲットになる合成ビジュアル。
 pub struct AngleVisual {
     visual: ComPtr<IDCompositionVisual>,
     swap_chain: ComPtr<winapi::shared::dxgi1_2::IDXGISwapChain1>,
