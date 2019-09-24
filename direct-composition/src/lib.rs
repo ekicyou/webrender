@@ -23,6 +23,15 @@ use winapi::um::dcomp::IDCompositionVisual;
 mod com;
 mod egl;
 
+/// 合成ターゲット（ルート）
+pub struct DirectCompositionRoot {
+    #[allow(unused)]  // Needs to be kept alive
+    composition_target: ComPtr<IDCompositionTarget>,
+    #[allow(unused)]  // Needs to be kept alive
+    root_visual: ComPtr<IDCompositionVisual>,
+}
+
+/// Direct Composition Window
 pub struct DirectComposition {
     d3d_device: ComPtr<ID3D11Device>,
     dxgi_factory: ComPtr<IDXGIFactory2>,
@@ -31,19 +40,21 @@ pub struct DirectComposition {
     pub gleam: Rc<dyn gleam::gl::Gl>,
 
     composition_device: ComPtr<IDCompositionDevice>,
-    root_visual: ComPtr<IDCompositionVisual>,
 
     #[allow(unused)]  // Needs to be kept alive
-    composition_target: ComPtr<IDCompositionTarget>,
+    front: DirectCompositionRoot,
+    #[allow(unused)]  // Needs to be kept alive
+    back: DirectCompositionRoot,
 }
 
 impl DirectComposition {
-    /// Initialize DirectComposition in the given window
+    /// ウィンドウハンドルより DirectComposition を初期化します。
     ///
     /// # Safety
     ///
-    /// `hwnd` must be a valid handle to a window.
+    /// `hwnd` ウィンドウハンドル
     pub unsafe fn new(hwnd: HWND) -> Self {
+        // D3Dデバイスの取得
         let d3d_device = ComPtr::new_with(|ptr_ptr| winapi::um::d3d11::D3D11CreateDevice(
             ptr::null_mut(),
             winapi::um::d3dcommon::D3D_DRIVER_TYPE_HARDWARE,
@@ -62,38 +73,51 @@ impl DirectComposition {
             ptr::null_mut(),
         ));
 
+        // D3Dデバイスに紐づいたGLデバイスの作成
         let egl = egl::SharedEglThings::new(d3d_device.as_raw());
         let gleam = gleam::gl::GlesFns::load_with(egl::get_proc_address);
 
+        // DXGIデバイスの取得
         let dxgi_device = d3d_device.cast::<winapi::shared::dxgi::IDXGIDevice>();
 
         // https://msdn.microsoft.com/en-us/library/windows/desktop/hh404556(v=vs.85).aspx#code-snippet-1
-        // “Because you can create a Direct3D device without creating a swap chain,
-        //  you might need to retrieve the factory that is used to create the device
-        //  in order to create a swap chain.”
+        // スワップチェーンの取得にはDXGIファクトリが必要
         let adapter = ComPtr::new_with(|ptr_ptr| dxgi_device.GetAdapter(ptr_ptr));
         let dxgi_factory = ComPtr::<IDXGIFactory2>::new_with_uuid(|uuid, ptr_ptr| {
             adapter.GetParent(uuid, ptr_ptr)
         });
 
-        // Create the DirectComposition device object.
+        // DirectCompositionデバイスの取得
         let composition_device = ComPtr::<IDCompositionDevice>::new_with_uuid(|uuid, ptr_ptr| {
             winapi::um::dcomp::DCompositionCreateDevice(&*dxgi_device, uuid, ptr_ptr)
         });
 
-        // Create the composition target object based on the
-        // specified application window.
-        let composition_target = ComPtr::new_with(|ptr_ptr| {
-            composition_device.CreateTargetForHwnd(hwnd, TRUE, ptr_ptr)
-        });
+        // 合成ターゲットの取得（前面）
+        let front = {
+            let is_top = TRUE;  // 前面
+            let composition_target = ComPtr::new_with(|ptr_ptr| {
+                composition_device.CreateTargetForHwnd(hwnd, is_top, ptr_ptr)});
+            let root_visual = ComPtr::new_with(|ptr_ptr| composition_device.CreateVisual(ptr_ptr));
+            composition_target.SetRoot(&*root_visual).check_hresult();
+            DirectCompositionRoot{composition_target, root_visual,}
+        };
 
-        let root_visual = ComPtr::new_with(|ptr_ptr| composition_device.CreateVisual(ptr_ptr));
-        composition_target.SetRoot(&*root_visual).check_hresult();
+        // 合成ターゲットの取得（背面）
+        let back = {
+            let is_top = FALSE;  // 背面
+            let composition_target = ComPtr::new_with(|ptr_ptr| {
+                composition_device.CreateTargetForHwnd(hwnd, is_top, ptr_ptr)});
+            let root_visual = ComPtr::new_with(|ptr_ptr| composition_device.CreateVisual(ptr_ptr));
+            composition_target.SetRoot(&*root_visual).check_hresult();
+            DirectCompositionRoot{composition_target, root_visual,}
+        };
 
+        // 戻り値
         DirectComposition {
             d3d_device, dxgi_factory,
             egl, gleam,
-            composition_device, composition_target, root_visual,
+            composition_device,
+            front, back,
         }
     }
 
@@ -138,7 +162,7 @@ impl DirectComposition {
 
             let visual = ComPtr::new_with(|ptr_ptr| self.composition_device.CreateVisual(ptr_ptr));
             visual.SetContent(&*****swap_chain).check_hresult();
-            self.root_visual.AddVisual(&*visual, FALSE, ptr::null_mut()).check_hresult();
+            self.front.root_visual.AddVisual(&*visual, FALSE, ptr::null_mut()).check_hresult();
 
             AngleVisual { visual, swap_chain, egl, gleam }
         }
