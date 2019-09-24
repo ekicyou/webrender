@@ -34,6 +34,7 @@ macro_rules! attributes {
 }
 
 impl SharedEglThings {
+    /// D3Dデバイスに紐づいたANGLE GLデバイスを作成して返します。
     pub unsafe fn new(d3d_device: *mut ID3D11Device) -> Rc<Self> {
         let device = eglCreateDeviceANGLE(
             D3D11_DEVICE_ANGLE,
