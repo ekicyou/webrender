@@ -113,7 +113,7 @@ impl Rectangle {
     fn new(composition: &DirectComposition, notifier: &Box<Notifier>,
            device_pixel_ratio: f32, size: api::units::DeviceIntSize, r: f32, g: f32, b: f32, a: f32)
            -> Self {
-        let visual = composition.create_angle_visual(size.width as u32, size.height as u32);
+        let visual = composition.create_angle_visual(true, size.width as u32, size.height as u32);
         visual.make_current();
 
         let (renderer, sender) = webrender::Renderer::new(
