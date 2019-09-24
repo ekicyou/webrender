@@ -26,9 +26,9 @@ mod egl;
 /// 合成ターゲット（ルート）
 pub struct DirectCompositionRoot {
     #[allow(unused)]  // Needs to be kept alive
-    composition_target: ComPtr<IDCompositionTarget>,
+    target: ComPtr<IDCompositionTarget>,
     #[allow(unused)]  // Needs to be kept alive
-    root_visual: ComPtr<IDCompositionVisual>,
+    visual: ComPtr<IDCompositionVisual>,
 }
 
 /// Direct Composition Window
@@ -95,21 +95,21 @@ impl DirectComposition {
         // 合成ターゲットの取得（前面）
         let front = {
             let is_top = TRUE;  // 前面
-            let composition_target = ComPtr::new_with(|ptr_ptr| {
+            let target = ComPtr::new_with(|ptr_ptr| {
                 composition_device.CreateTargetForHwnd(hwnd, is_top, ptr_ptr)});
-            let root_visual = ComPtr::new_with(|ptr_ptr| composition_device.CreateVisual(ptr_ptr));
-            composition_target.SetRoot(&*root_visual).check_hresult();
-            DirectCompositionRoot{composition_target, root_visual,}
+            let visual = ComPtr::new_with(|ptr_ptr| composition_device.CreateVisual(ptr_ptr));
+            target.SetRoot(&*visual).check_hresult();
+            DirectCompositionRoot{target, visual,}
         };
 
         // 合成ターゲットの取得（背面）
         let back = {
             let is_top = FALSE;  // 背面
-            let composition_target = ComPtr::new_with(|ptr_ptr| {
+            let target = ComPtr::new_with(|ptr_ptr| {
                 composition_device.CreateTargetForHwnd(hwnd, is_top, ptr_ptr)});
-            let root_visual = ComPtr::new_with(|ptr_ptr| composition_device.CreateVisual(ptr_ptr));
-            composition_target.SetRoot(&*root_visual).check_hresult();
-            DirectCompositionRoot{composition_target, root_visual,}
+            let visual = ComPtr::new_with(|ptr_ptr| composition_device.CreateVisual(ptr_ptr));
+            target.SetRoot(&*visual).check_hresult();
+            DirectCompositionRoot{target, visual,}
         };
 
         // 戻り値
@@ -121,14 +121,14 @@ impl DirectComposition {
         }
     }
 
-    /// Execute changes to the DirectComposition scene.
+    /// シーンの確定
     pub fn commit(&self) {
         unsafe {
             self.composition_device.Commit().check_hresult()
         }
     }
 
-    pub fn create_angle_visual(&self, width: u32, height: u32) -> AngleVisual {
+    pub fn create_angle_visual(&self, topmost: bool, width: u32, height: u32) -> AngleVisual {
         unsafe {
             let desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width,
@@ -162,7 +162,8 @@ impl DirectComposition {
 
             let visual = ComPtr::new_with(|ptr_ptr| self.composition_device.CreateVisual(ptr_ptr));
             visual.SetContent(&*****swap_chain).check_hresult();
-            self.front.root_visual.AddVisual(&*visual, FALSE, ptr::null_mut()).check_hresult();
+            let root = if topmost { &self.front } else { &self.back };
+            root.visual.AddVisual(&*visual, FALSE, ptr::null_mut()).check_hresult();
 
             AngleVisual { visual, swap_chain, egl, gleam }
         }
