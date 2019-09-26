@@ -10,7 +10,7 @@ extern crate webrender;             //  2D描画ライブラリ
 extern crate winit;                 //  ウィンドウ管理
 
 use euclid::size2;
-use direct_composition::DirectComposition;
+use direct_composition::CompositionWindow;
 use std::sync::mpsc;
 use webrender::api;
 use winit::os::windows::{WindowExt, WindowBuilderExt};
@@ -94,9 +94,9 @@ fn main() {
     });
 }
 
-fn direct_composition_from_window(window: &winit::Window) -> DirectComposition {
+fn direct_composition_from_window(window: &winit::Window) -> CompositionWindow {
     unsafe {
-        DirectComposition::new(window.get_hwnd() as _)
+        CompositionWindow::new(window.get_hwnd() as _)
     }
 }
 
@@ -110,7 +110,7 @@ struct Rectangle {
 }
 
 impl Rectangle {
-    fn new(composition: &DirectComposition, notifier: &Box<Notifier>,
+    fn new(composition: &CompositionWindow, notifier: &Box<Notifier>,
            device_pixel_ratio: f32, size: api::units::DeviceIntSize, r: f32, g: f32, b: f32, a: f32)
            -> Self {
         let visual = composition.create_angle_visual(true, size.width as u32, size.height as u32);
