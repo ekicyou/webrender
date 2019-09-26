@@ -110,3 +110,48 @@ impl<T> Drop for ComPtr<T> where T: Interface {
         }
     }
 }
+
+//======
+
+pub type ComResult<T> = Result<T, HRESULT>;
+
+pub trait ComResultExt<T> {
+    fn hr(self, value: T) -> ComResult<T>;
+}
+
+impl<T> ComResultExt<T> for HRESULT {
+    fn hr(self, value: T) ->ComResult<T> {
+        match SUCCEEDED(self) {
+            true => Ok(value),
+            _    => Err(self),
+        }
+    }
+}
+
+impl<T> ComPtr<T> where T: Interface {
+    /// For use with APIs that take an interface UUID and
+    /// "return" a new COM object through a `*mut *mut c_void` out-parameter.
+    pub unsafe fn with_uuid<F>(f: F) -> ComResult<Self>
+        where F: FnOnce(&GUID, *mut *mut c_void) -> HRESULT
+    {
+        Self::with(|ptr| f(&T::uuidof(), ptr as _))
+    }
+
+    /// For use with APIs that "return" a new COM object through a `*mut *mut T` out-parameter.
+    pub unsafe fn with<F>(f: F) -> ComResult<Self>
+        where F: FnOnce(*mut *mut T) -> HRESULT
+    {
+        let mut ptr = ptr::null_mut();
+        let hresult = f(&mut ptr);
+        if SUCCEEDED(hresult) {
+            Ok(ComPtr::from_raw(ptr))
+        } else {
+            if !ptr.is_null() {
+                let ptr = ptr as *mut IUnknown;
+                (*ptr).Release();
+            }
+            Err(hresult)
+        }
+    }
+
+}

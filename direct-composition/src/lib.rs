@@ -32,7 +32,7 @@ pub struct DirectCompositionRoot {
 }
 
 /// Direct Composition Window
-pub struct DirectComposition {
+pub struct CompositionWindow {
     d3d_device: ComPtr<ID3D11Device>,
     dxgi_factory: ComPtr<IDXGIFactory2>,
 
@@ -47,8 +47,8 @@ pub struct DirectComposition {
     back: DirectCompositionRoot,
 }
 
-impl DirectComposition {
-    /// ウィンドウハンドルより DirectComposition を初期化します。
+impl CompositionWindow {
+    /// ウィンドウハンドルより CompositionWindow を初期化します。
     ///
     /// # Safety
     ///
@@ -94,9 +94,9 @@ impl DirectComposition {
 
         // 合成ターゲットの取得（前面）
         let front = {
-            let is_top = TRUE;  // 前面
+            let topmost = TRUE;  // 前面
             let target = ComPtr::new_with(|ptr_ptr| {
-                composition_device.CreateTargetForHwnd(hwnd, is_top, ptr_ptr)});
+                composition_device.CreateTargetForHwnd(hwnd, topmost, ptr_ptr)});
             let visual = ComPtr::new_with(|ptr_ptr| composition_device.CreateVisual(ptr_ptr));
             target.SetRoot(&*visual).check_hresult();
             DirectCompositionRoot{target, visual,}
@@ -104,16 +104,16 @@ impl DirectComposition {
 
         // 合成ターゲットの取得（背面）
         let back = {
-            let is_top = FALSE;  // 背面
+            let topmost = FALSE;  // 背面
             let target = ComPtr::new_with(|ptr_ptr| {
-                composition_device.CreateTargetForHwnd(hwnd, is_top, ptr_ptr)});
+                composition_device.CreateTargetForHwnd(hwnd, topmost, ptr_ptr)});
             let visual = ComPtr::new_with(|ptr_ptr| composition_device.CreateVisual(ptr_ptr));
             target.SetRoot(&*visual).check_hresult();
             DirectCompositionRoot{target, visual,}
         };
 
         // 戻り値
-        DirectComposition {
+        CompositionWindow {
             d3d_device, dxgi_factory,
             egl, gleam,
             composition_device,
