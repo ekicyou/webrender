@@ -115,16 +115,27 @@ impl<T> Drop for ComPtr<T> where T: Interface {
 
 pub type ComResult<T> = Result<T, HRESULT>;
 
-pub trait ComResultExt<T> {
-    fn hr(self, value: T) -> ComResult<T>;
+pub trait ComResultEstCheck {
+    fn check(self) -> Result<(), HRESULT>;
 }
 
-impl<T> ComResultExt<T> for HRESULT {
-    fn hr(self, value: T) ->ComResult<T> {
+pub trait ComResultExtHr<T> {
+    fn hr(self, value: T) -> Result<T, HRESULT>;
+}
+
+impl ComResultEstCheck for HRESULT {
+    fn check(self) -> Result<(), HRESULT> {
         match SUCCEEDED(self) {
-            true => Ok(value),
+            true => Ok(()),
             _    => Err(self),
         }
+    }
+}
+
+impl<T> ComResultExtHr<T> for HRESULT {
+    fn hr(self, value: T) -> Result<T, HRESULT> {
+        self.check()?;
+        Ok(value)
     }
 }
 
@@ -153,5 +164,4 @@ impl<T> ComPtr<T> where T: Interface {
             Err(hresult)
         }
     }
-
 }

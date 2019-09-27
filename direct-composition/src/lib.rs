@@ -24,7 +24,7 @@ mod com;
 mod egl;
 
 /// 合成ターゲット（ルート）
-pub struct DirectCompositionRoot {
+pub struct CompositionRoot {
     #[allow(unused)]  // Needs to be kept alive
     target: ComPtr<IDCompositionTarget>,
     #[allow(unused)]  // Needs to be kept alive
@@ -42,9 +42,9 @@ pub struct CompositionWindow {
     composition_device: ComPtr<IDCompositionDevice>,
 
     #[allow(unused)]  // Needs to be kept alive
-    front: DirectCompositionRoot,
+    front: CompositionRoot,
     #[allow(unused)]  // Needs to be kept alive
-    back: DirectCompositionRoot,
+    back: CompositionRoot,
 }
 
 impl CompositionWindow {
@@ -99,7 +99,7 @@ impl CompositionWindow {
                 composition_device.CreateTargetForHwnd(hwnd, topmost, ptr_ptr)});
             let visual = ComPtr::new_with(|ptr_ptr| composition_device.CreateVisual(ptr_ptr));
             target.SetRoot(&*visual).check_hresult();
-            DirectCompositionRoot{target, visual,}
+            CompositionRoot{target, visual,}
         };
 
         // 合成ターゲットの取得（背面）
@@ -109,7 +109,7 @@ impl CompositionWindow {
                 composition_device.CreateTargetForHwnd(hwnd, topmost, ptr_ptr)});
             let visual = ComPtr::new_with(|ptr_ptr| composition_device.CreateVisual(ptr_ptr));
             target.SetRoot(&*visual).check_hresult();
-            DirectCompositionRoot{target, visual,}
+            CompositionRoot{target, visual,}
         };
 
         // 戻り値
