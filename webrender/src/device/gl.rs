@@ -1036,11 +1036,17 @@ pub struct Device {
 
     optimal_pbo_stride: NonZeroUsize,
 
+    /// Whether we must ensure the source strings passed to glShaderSource()
+    /// are null-terminated, to work around driver bugs.
+    requires_null_terminated_shader_source: bool,
+
     // GL extensions
     extensions: Vec<String>,
 
     /// Dumps the source of the shader with the given name
     dump_shader_source: Option<String>,
+
+    surface_is_y_flipped: bool,
 }
 
 /// Contains the parameters necessary to bind a draw target.
@@ -1053,6 +1059,7 @@ pub enum DrawTarget {
         rect: FramebufferIntRect,
         /// Total size of the target.
         total_size: FramebufferIntSize,
+        surface_is_y_flipped: bool,
     },
     /// Use the provided texture.
     Texture {
@@ -1076,14 +1083,21 @@ pub enum DrawTarget {
         fbo: FBOId,
         size: FramebufferIntSize,
     },
+    /// An OS compositor surface
+    NativeSurface {
+        offset: DeviceIntPoint,
+        external_fbo_id: u32,
+        dimensions: DeviceIntSize,
+    },
 }
 
 impl DrawTarget {
-    pub fn new_default(size: DeviceIntSize) -> Self {
+    pub fn new_default(size: DeviceIntSize, surface_is_y_flipped: bool) -> Self {
         let total_size = FramebufferIntSize::from_untyped(size.to_untyped());
         DrawTarget::Default {
             rect: total_size.into(),
             total_size,
+            surface_is_y_flipped,
         }
     }
 
@@ -1123,18 +1137,24 @@ impl DrawTarget {
             DrawTarget::Default { total_size, .. } => DeviceIntSize::from_untyped(total_size.to_untyped()),
             DrawTarget::Texture { dimensions, .. } => dimensions,
             DrawTarget::External { size, .. } => DeviceIntSize::from_untyped(size.to_untyped()),
+            DrawTarget::NativeSurface { dimensions, .. } => dimensions,
         }
     }
 
     pub fn to_framebuffer_rect(&self, device_rect: DeviceIntRect) -> FramebufferIntRect {
         let mut fb_rect = FramebufferIntRect::from_untyped(&device_rect.to_untyped());
         match *self {
-            DrawTarget::Default { ref rect, .. } => {
+            DrawTarget::Default { ref rect, surface_is_y_flipped, .. } => {
                 // perform a Y-flip here
-                fb_rect.origin.y = rect.origin.y + rect.size.height - fb_rect.origin.y - fb_rect.size.height;
-                fb_rect.origin.x += rect.origin.x;
+                if !surface_is_y_flipped {
+                    fb_rect.origin.y = rect.origin.y + rect.size.height - fb_rect.origin.y - fb_rect.size.height;
+                    fb_rect.origin.x += rect.origin.x;
+                }
             }
             DrawTarget::Texture { .. } | DrawTarget::External { .. } => (),
+            DrawTarget::NativeSurface { .. } => {
+                panic!("bug: is this ever used for native surfaces?");
+            }
         }
         fb_rect
     }
@@ -1155,6 +1175,9 @@ impl DrawTarget {
                     self.to_framebuffer_rect(scissor_rect.translate(-content_origin.to_vector()))
                         .intersection(rect)
                         .unwrap_or_else(FramebufferIntRect::zero)
+                }
+                DrawTarget::NativeSurface { offset, .. } => {
+                    FramebufferIntRect::from_untyped(&scissor_rect.translate(offset.to_vector()).to_untyped())
                 }
                 DrawTarget::Texture { .. } | DrawTarget::External { .. } => {
                     FramebufferIntRect::from_untyped(&scissor_rect.to_untyped())
@@ -1201,6 +1224,9 @@ impl From<DrawTarget> for ReadTarget {
     fn from(t: DrawTarget) -> Self {
         match t {
             DrawTarget::Default { .. } => ReadTarget::Default,
+            DrawTarget::NativeSurface { .. } => {
+                unreachable!("bug: native surfaces cannot be read targets");
+            }
             DrawTarget::Texture { fbo_id, .. } =>
                 ReadTarget::Texture { fbo_id },
             DrawTarget::External { fbo, .. } =>
@@ -1219,6 +1245,7 @@ impl Device {
         allow_texture_storage_support: bool,
         allow_texture_swizzling: bool,
         dump_shader_source: Option<String>,
+        surface_is_y_flipped: bool,
     ) -> Device {
         let mut max_texture_size = [0];
         let mut max_texture_layers = [0];
@@ -1302,6 +1329,11 @@ impl Device {
         // GL_EXT_texture_storage and GL_EXT_texture_format_BGRA8888.
         let supports_gles_bgra = supports_extension(&extensions, "GL_EXT_texture_format_BGRA8888");
 
+        // On the android emulator glTexImage fails to create textures larger than 3379.
+        // So we must use glTexStorage instead. See bug 1591436.
+        let is_emulator = renderer_name.starts_with("Android Emulator");
+        let avoid_tex_image = is_emulator;
+
         let (color_formats, bgra_formats, bgra8_sampling_swizzle, texture_storage_usage) = match gl.get_type() {
             // There is `glTexStorage`, use it and expect RGBA on the input.
             gl::GlType::Gl if
@@ -1332,7 +1364,7 @@ impl Device {
             // format and glTexImage. If texture storage is supported we can
             // use it for other formats.
             // We can't use glTexStorage with BGRA8 as the internal format.
-            gl::GlType::Gles if supports_gles_bgra => (
+            gl::GlType::Gles if supports_gles_bgra && !avoid_tex_image => (
                 TextureFormatPair::from(ImageFormat::RGBA8),
                 TextureFormatPair::from(gl::BGRA_EXT),
                 Swizzle::Rgba, // no conversion needed
@@ -1386,6 +1418,11 @@ impl Device {
 
         let supports_texture_swizzle = allow_texture_swizzling &&
             (gl.get_type() == gl::GlType::Gles || supports_extension(&extensions, "GL_ARB_texture_storage"));
+
+
+        // On the android emulator, glShaderSource can crash if the source
+        // strings are not null-terminated. See bug 1591945.
+        let requires_null_terminated_shader_source = is_emulator;
 
         // On Adreno GPUs PBO texture upload is only performed asynchronously
         // if the stride of the data in the PBO is a multiple of 256 bytes.
@@ -1442,8 +1479,10 @@ impl Device {
             frame_id: GpuFrameId(0),
             extensions,
             texture_storage_usage,
+            requires_null_terminated_shader_source,
             optimal_pbo_stride,
             dump_shader_source,
+            surface_is_y_flipped,
         }
     }
 
@@ -1469,6 +1508,10 @@ impl Device {
     /// Returns the limit on texture dimensions (width or height).
     pub fn max_texture_size(&self) -> i32 {
         self.max_texture_size
+    }
+
+    pub fn surface_is_y_flipped(&self) -> bool {
+        self.surface_is_y_flipped
     }
 
     /// Returns the limit on texture array layers.
@@ -1527,10 +1570,19 @@ impl Device {
         name: &str,
         shader_type: gl::GLenum,
         source: &String,
+        requires_null_terminated_shader_source: bool,
     ) -> Result<gl::GLuint, ShaderError> {
         debug!("compile {}", name);
         let id = gl.create_shader(shader_type);
-        gl.shader_source(id, &[source.as_bytes()]);
+        if requires_null_terminated_shader_source {
+            // Ensure the source strings we pass to glShaderSource are
+            // null-terminated on buggy platforms.
+            use std::ffi::CString;
+            let terminated_source = CString::new(source.as_bytes()).unwrap();
+            gl.shader_source(id, &[terminated_source.as_bytes_with_nul()]);
+        } else {
+            gl.shader_source(id, &[source.as_bytes()]);
+        }
         gl.compile_shader(id);
         let log = gl.get_shader_info_log(id);
         let mut status = [0];
@@ -1704,7 +1756,9 @@ impl Device {
         target: DrawTarget,
     ) {
         let (fbo_id, rect, depth_available) = match target {
-            DrawTarget::Default { rect, .. } => (self.default_draw_fbo, rect, true),
+            DrawTarget::Default { rect, .. } => {
+                (self.default_draw_fbo, rect, true)
+            }
             DrawTarget::Texture { dimensions, fbo_id, with_depth, .. } => {
                 let rect = FramebufferIntRect::new(
                     FramebufferIntPoint::zero(),
@@ -1712,7 +1766,19 @@ impl Device {
                 );
                 (fbo_id, rect, with_depth)
             },
-            DrawTarget::External { fbo, size } => (fbo, size.into(), false),
+            DrawTarget::External { fbo, size } => {
+                (fbo, size.into(), false)
+            }
+            DrawTarget::NativeSurface { external_fbo_id, offset, dimensions, .. } => {
+                (
+                    FBOId(external_fbo_id),
+                    FramebufferIntRect::new(
+                        FramebufferIntPoint::from_untyped(offset.to_untyped()),
+                        FramebufferIntSize::from_untyped(dimensions.to_untyped()),
+                    ),
+                    true
+                )
+            }
         };
 
         self.depth_available = depth_available;
@@ -1823,7 +1889,7 @@ impl Device {
         if build_program {
             // Compile the vertex shader
             let vs_source = info.compute_source(self, SHADER_KIND_VERTEX);
-            let vs_id = match Device::compile_shader(&*self.gl, &info.base_filename, gl::VERTEX_SHADER, &vs_source) {
+            let vs_id = match Device::compile_shader(&*self.gl, &info.base_filename, gl::VERTEX_SHADER, &vs_source, self.requires_null_terminated_shader_source) {
                     Ok(vs_id) => vs_id,
                     Err(err) => return Err(err),
                 };
@@ -1831,7 +1897,7 @@ impl Device {
             // Compile the fragment shader
             let fs_source = info.compute_source(self, SHADER_KIND_FRAGMENT);
             let fs_id =
-                match Device::compile_shader(&*self.gl, &info.base_filename, gl::FRAGMENT_SHADER, &fs_source) {
+                match Device::compile_shader(&*self.gl, &info.base_filename, gl::FRAGMENT_SHADER, &fs_source, self.requires_null_terminated_shader_source) {
                     Ok(fs_id) => fs_id,
                     Err(err) => {
                         self.gl.delete_shader(vs_id);
