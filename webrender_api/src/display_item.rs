@@ -12,10 +12,6 @@ use crate::color::ColorF;
 use crate::image::{ColorDepth, ImageKey};
 use crate::units::*;
 
-// Maximum blur radius.
-// Taken from nsCSSRendering.cpp in Gecko.
-pub const MAX_BLUR_RADIUS: f32 = 300.;
-
 // ******************************************************************
 // * NOTE: some of these structs have an "IMPLICIT" comment.        *
 // * This indicates that the BuiltDisplayList will have serialized  *
@@ -33,6 +29,10 @@ pub const MAX_BLUR_RADIUS: f32 = 300.;
 /// events.
 pub type ItemTag = (u64, u16);
 
+/// An identifier used to refer to previously sent display items. Currently it
+/// refers to individual display items, but this may change later.
+pub type ItemKey = u16;
+
 bitflags! {
     #[repr(C)]
     #[derive(Deserialize, MallocSizeOf, Serialize, PeekPoke)]
@@ -43,6 +43,10 @@ bitflags! {
         const IS_SCROLLBAR_CONTAINER = 1 << 1;
         /// If set, this primitive represents a scroll bar thumb
         const IS_SCROLLBAR_THUMB = 1 << 2;
+        /// This is used as a performance hint - this primitive may be promoted to a native
+        /// compositor surface under certain (implementation specific) conditions. This
+        /// is typically used for large videos, and canvas elements.
+        const PREFER_COMPOSITOR_SURFACE = 1 << 3;
     }
 }
 
@@ -125,6 +129,7 @@ pub enum DisplayItem {
     PushShadow(PushShadowDisplayItem),
     Gradient(GradientDisplayItem),
     RadialGradient(RadialGradientDisplayItem),
+    ConicGradient(ConicGradientDisplayItem),
     Image(ImageDisplayItem),
     RepeatingImage(RepeatingImageDisplayItem),
     YuvImage(YuvImageDisplayItem),
@@ -152,6 +157,9 @@ pub enum DisplayItem {
     PopReferenceFrame,
     PopStackingContext,
     PopAllShadows,
+
+    ReuseItems(ItemKey),
+    RetainedItems(ItemKey),
 }
 
 /// This is a "complete" version of the DisplayItem, with all implicit trailing
@@ -170,6 +178,7 @@ pub enum DebugDisplayItem {
     PushShadow(PushShadowDisplayItem),
     Gradient(GradientDisplayItem),
     RadialGradient(RadialGradientDisplayItem),
+    ConicGradient(ConicGradientDisplayItem),
     Image(ImageDisplayItem),
     RepeatingImage(RepeatingImageDisplayItem),
     YuvImage(YuvImageDisplayItem),
@@ -280,13 +289,14 @@ pub struct ScrollFrameDisplayItem {
     /// should be added to those display item coordinates in order to get a
     /// normalized value that is consistent across display lists.
     pub external_scroll_offset: LayoutVector2D,
-}
+} // IMPLICIT: complex_clips: Vec<ComplexClipRegion>
 
-/// A solid color to draw (may not actually be a rectangle due to complex clips)
+/// A solid or an animating color to draw (may not actually be a rectangle due to complex clips)
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize, PeekPoke)]
 pub struct RectangleDisplayItem {
     pub common: CommonItemProperties,
-    pub color: ColorF,
+    pub bounds: LayoutRect,
+    pub color: PropertyBinding<ColorF>,
 }
 
 /// Clears all colors from the area, making it possible to cut holes in the window.
@@ -294,6 +304,7 @@ pub struct RectangleDisplayItem {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize, PeekPoke)]
 pub struct ClearRectangleDisplayItem {
     pub common: CommonItemProperties,
+    pub bounds: LayoutRect,
 }
 
 /// A minimal hit-testable item for the parent browser's convenience, and is
@@ -429,6 +440,7 @@ pub enum NinePatchBorderSource {
     Image(ImageKey),
     Gradient(Gradient),
     RadialGradient(RadialGradient),
+    ConicGradient(ConicGradient),
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize, PeekPoke)]
@@ -533,8 +545,8 @@ pub enum BorderStyle {
 }
 
 impl BorderStyle {
-    pub fn is_hidden(&self) -> bool {
-        *self == BorderStyle::Hidden || *self == BorderStyle::None
+    pub fn is_hidden(self) -> bool {
+        self == BorderStyle::Hidden || self == BorderStyle::None
     }
 }
 
@@ -618,6 +630,15 @@ pub struct RadialGradient {
     pub extend_mode: ExtendMode,
 } // IMPLICIT stops: Vec<GradientStop>
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize, PeekPoke)]
+pub struct ConicGradient {
+    pub center: LayoutPoint,
+    pub angle: f32,
+    pub start_offset: f32,
+    pub end_offset: f32,
+    pub extend_mode: ExtendMode,
+} // IMPLICIT stops: Vec<GradientStop>
+
 /// Just an abstraction for bundling up a bunch of clips into a "super clip".
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize, PeekPoke)]
 pub struct ClipChainItem {
@@ -633,6 +654,18 @@ pub struct RadialGradientDisplayItem {
     // defining the bounds of the item. Needs non-trivial backend changes.
     pub bounds: LayoutRect,
     pub gradient: RadialGradient,
+    pub tile_size: LayoutSize,
+    pub tile_spacing: LayoutSize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize, PeekPoke)]
+pub struct ConicGradientDisplayItem {
+    pub common: CommonItemProperties,
+    /// The area to tile the gradient over (first tile starts at origin of this rect)
+    // FIXME: this should ideally just be `tile_origin` here, with the clip_rect
+    // defining the bounds of the item. Needs non-trivial backend changes.
+    pub bounds: LayoutRect,
+    pub gradient: ConicGradient,
     pub tile_size: LayoutSize,
     pub tile_spacing: LayoutSize,
 }
@@ -718,8 +751,8 @@ pub enum RasterSpace {
 }
 
 impl RasterSpace {
-    pub fn local_scale(&self) -> Option<f32> {
-        match *self {
+    pub fn local_scale(self) -> Option<f32> {
+        match self {
             RasterSpace::Local(scale) => Some(scale),
             RasterSpace::Screen => None,
         }
@@ -836,12 +869,6 @@ pub struct BlurPrimitive {
     pub radius: f32,
 }
 
-impl BlurPrimitive {
-    pub fn sanitize(&mut self) {
-        self.radius = self.radius.min(MAX_BLUR_RADIUS);
-    }
-}
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize, PeekPoke)]
 pub struct OpacityPrimitive {
@@ -868,12 +895,6 @@ pub struct ColorMatrixPrimitive {
 pub struct DropShadowPrimitive {
     pub input: FilterPrimitiveInput,
     pub shadow: Shadow,
-}
-
-impl DropShadowPrimitive {
-    pub fn sanitize(&mut self) {
-        self.shadow.blur_radius = self.shadow.blur_radius.min(MAX_BLUR_RADIUS);
-    }
 }
 
 #[repr(C)]
@@ -933,9 +954,7 @@ impl FilterPrimitiveKind {
     pub fn sanitize(&mut self) {
         match self {
             FilterPrimitiveKind::Flood(flood) => flood.sanitize(),
-            FilterPrimitiveKind::Blur(blur) => blur.sanitize(),
             FilterPrimitiveKind::Opacity(opacity) => opacity.sanitize(),
-            FilterPrimitiveKind::DropShadow(drop_shadow) => drop_shadow.sanitize(),
 
             // No sanitization needed.
             FilterPrimitiveKind::Identity(..) |
@@ -943,6 +962,8 @@ impl FilterPrimitiveKind {
             FilterPrimitiveKind::ColorMatrix(..) |
             FilterPrimitiveKind::Offset(..) |
             FilterPrimitiveKind::Composite(..) |
+            FilterPrimitiveKind::Blur(..) |
+            FilterPrimitiveKind::DropShadow(..) |
             // Component transfer's filter data is sanitized separately.
             FilterPrimitiveKind::ComponentTransfer(..) => {}
         }
@@ -1198,8 +1219,8 @@ pub enum YuvFormat {
 }
 
 impl YuvFormat {
-    pub fn get_plane_num(&self) -> usize {
-        match *self {
+    pub fn get_plane_num(self) -> usize {
+        match self {
             YuvFormat::NV12 => 2,
             YuvFormat::PlanarYCbCr => 3,
             YuvFormat::InterleavedYCbCr => 1,
@@ -1302,12 +1323,14 @@ impl BorderRadius {
         }
     }
 
+    /// Return whether, in each corner, the radius in *either* direction is zero.
+    /// This means that none of the corners are rounded.
     pub fn is_zero(&self) -> bool {
-        if let Some(radius) = self.is_uniform() {
-            radius == 0.0
-        } else {
-            false
-        }
+        let corner_is_zero = |corner: &LayoutSize| corner.width == 0.0 || corner.height == 0.0;
+        corner_is_zero(&self.top_left) &&
+        corner_is_zero(&self.top_right) &&
+        corner_is_zero(&self.bottom_right) &&
+        corner_is_zero(&self.bottom_left)
     }
 }
 
@@ -1421,7 +1444,7 @@ impl SpatialId {
 /// every pipeline, which always has an external id.
 ///
 /// When setting display lists with the `preserve_frame_state` this id is used to preserve scroll
-/// offsets between different sets of ClipScrollNodes which are ScrollFrames.
+/// offsets between different sets of SpatialNodes which are ScrollFrames.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize, PeekPoke)]
 #[repr(C)]
 pub struct ExternalScrollId(pub u64, pub PipelineId);
@@ -1445,6 +1468,7 @@ impl DisplayItem {
             DisplayItem::HitTest(..) => "hit_test",
             DisplayItem::Clip(..) => "clip",
             DisplayItem::ClipChain(..) => "clip_chain",
+            DisplayItem::ConicGradient(..) => "conic_gradient",
             DisplayItem::Gradient(..) => "gradient",
             DisplayItem::Iframe(..) => "iframe",
             DisplayItem::Image(..) => "image",
@@ -1463,6 +1487,8 @@ impl DisplayItem {
             DisplayItem::Rectangle(..) => "rectangle",
             DisplayItem::ScrollFrame(..) => "scroll_frame",
             DisplayItem::SetGradientStops => "set_gradient_stops",
+            DisplayItem::ReuseItems(..) => "reuse_item",
+            DisplayItem::RetainedItems(..) => "retained_items",
             DisplayItem::StickyFrame(..) => "sticky_frame",
             DisplayItem::Text(..) => "text",
             DisplayItem::YuvImage(..) => "yuv_image",

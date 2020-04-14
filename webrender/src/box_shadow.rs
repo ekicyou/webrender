@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use api::{BorderRadius, BoxShadowClipMode, ClipMode, ColorF, PrimitiveKeyKind};
-use api::MAX_BLUR_RADIUS;
+use api::PropertyBinding;
 use api::units::*;
 use crate::clip::{ClipItemKey, ClipItemKeyKind};
 use crate::scene_building::SceneBuilder;
@@ -49,6 +49,10 @@ pub struct BoxShadowClipSource {
 
 // The blur shader samples BLUR_SAMPLE_SCALE * blur_radius surrounding texels.
 pub const BLUR_SAMPLE_SCALE: f32 = 3.0;
+
+// Maximum blur radius for box-shadows (different than blur filters).
+// Taken from nsCSSRendering.cpp in Gecko.
+pub const MAX_BLUR_RADIUS: f32 = 300.;
 
 // A cache key that uniquely identifies a minimally sized
 // and blurred box-shadow rect that can be stored in the
@@ -163,7 +167,7 @@ impl<'a> SceneBuilder<'a> {
                 &LayoutPrimitiveInfo::with_clip_rect(final_prim_rect, prim_info.clip_rect),
                 clips,
                 PrimitiveKeyKind::Rectangle {
-                    color: color.into(),
+                    color: PropertyBinding::Value(color.into()),
                 },
             );
         } else {
@@ -189,7 +193,7 @@ impl<'a> SceneBuilder<'a> {
             // Draw the box-shadow as a solid rect, using a box-shadow
             // clip mask item.
             let prim = PrimitiveKeyKind::Rectangle {
-                color: color.into(),
+                color: PropertyBinding::Value(color.into()),
             };
 
             // Create the box-shadow clip item.

@@ -6,7 +6,7 @@ use api::{AlphaType, BorderDetails, BorderDisplayItem, BuiltDisplayListIter, Pri
 use api::{ClipId, ColorF, CommonItemProperties, ComplexClipRegion, ComponentTransferFuncType, RasterSpace};
 use api::{DisplayItem, DisplayItemRef, ExtendMode, ExternalScrollId, FilterData};
 use api::{FilterOp, FilterPrimitive, FontInstanceKey, GlyphInstance, GlyphOptions, GradientStop};
-use api::{IframeDisplayItem, ImageKey, ImageRendering, ItemRange, ColorDepth};
+use api::{IframeDisplayItem, ImageKey, ImageRendering, ItemRange, ColorDepth, QualitySettings};
 use api::{LineOrientation, LineStyle, NinePatchBorderSource, PipelineId, MixBlendMode};
 use api::{PropertyBinding, ReferenceFrame, ReferenceFrameKind, ScrollFrameDisplayItem, ScrollSensitivity};
 use api::{Shadow, SpaceAndClipInfo, SpatialId, StackingContext, StickyFrameDisplayItem};
@@ -14,7 +14,7 @@ use api::{ClipMode, PrimitiveKeyKind, TransformStyle, YuvColorSpace, ColorRange,
 use api::units::*;
 use crate::clip::{ClipChainId, ClipRegion, ClipItemKey, ClipStore, ClipItemKeyKind};
 use crate::clip::{ClipInternData, ClipDataHandle, ClipNodeKind};
-use crate::clip_scroll_tree::{ROOT_SPATIAL_NODE_INDEX, ClipScrollTree, SpatialNodeIndex};
+use crate::spatial_tree::{ROOT_SPATIAL_NODE_INDEX, SpatialTree, SpatialNodeIndex};
 use crate::frame_builder::{ChasePrimitive, FrameBuilderConfig};
 use crate::glyph_rasterizer::FontInstance;
 use crate::hit_test::{HitTestingItem, HitTestingScene};
@@ -23,15 +23,15 @@ use crate::intern::Interner;
 use crate::internal_types::{FastHashMap, FastHashSet, LayoutPrimitiveInfo, Filter};
 use crate::picture::{Picture3DContext, PictureCompositeMode, PicturePrimitive, PictureOptions};
 use crate::picture::{BlitReason, OrderedPictureChild, PrimitiveList, TileCacheInstance, ClusterFlags};
-use crate::prim_store::{PrimitiveInstance, PrimitiveSceneData};
+use crate::prim_store::PrimitiveInstance;
 use crate::prim_store::{PrimitiveInstanceKind, NinePatchDescriptor, PrimitiveStore};
 use crate::prim_store::{ScrollNodeAndClipChain, PictureIndex};
 use crate::prim_store::{InternablePrimitive, SegmentInstanceIndex};
-use crate::prim_store::{register_prim_chase_id, get_line_decoration_sizes};
+use crate::prim_store::{register_prim_chase_id, get_line_decoration_size};
 use crate::prim_store::{SpaceSnapper};
 use crate::prim_store::backdrop::Backdrop;
 use crate::prim_store::borders::{ImageBorder, NormalBorderPrim};
-use crate::prim_store::gradient::{GradientStopKey, LinearGradient, RadialGradient, RadialGradientParams};
+use crate::prim_store::gradient::{GradientStopKey, LinearGradient, RadialGradient, RadialGradientParams, ConicGradient, ConicGradientParams};
 use crate::prim_store::image::{Image, YuvImage};
 use crate::prim_store::line_dec::{LineDecoration, LineDecorationCacheKey};
 use crate::prim_store::picture::{Picture, PictureCompositeKey, PictureKey};
@@ -41,6 +41,7 @@ use crate::resource_cache::{FontInstanceMap, ImageRequest};
 use crate::scene::{Scene, BuiltScene, SceneStats, StackingContextHelpers};
 use crate::scene_builder_thread::Interners;
 use crate::spatial_node::{StickyFrameInfo, ScrollFrameKind};
+use euclid::approxeq::ApproxEq;
 use std::{f32, mem, usize, ops};
 use std::collections::vec_deque::VecDeque;
 use std::sync::Arc;
@@ -153,15 +154,15 @@ impl ScrollOffsetMapper {
 
     /// Return the accumulated external scroll offset for a spatial
     /// node. This caches the last result, which is the common case,
-    /// or defers to the clip scroll tree to build the value.
+    /// or defers to the spatial tree to build the value.
     fn external_scroll_offset(
         &mut self,
         spatial_node_index: SpatialNodeIndex,
-        clip_scroll_tree: &ClipScrollTree,
+        spatial_tree: &SpatialTree,
     ) -> LayoutVector2D {
         if spatial_node_index != self.current_spatial_node {
             self.current_spatial_node = spatial_node_index;
-            self.current_offset = clip_scroll_tree.external_scroll_offset(spatial_node_index);
+            self.current_offset = spatial_tree.external_scroll_offset(spatial_node_index);
         }
 
         self.current_offset
@@ -169,7 +170,7 @@ impl ScrollOffsetMapper {
 }
 
 /// A data structure that keeps track of mapping between API Ids for clips/spatials and the indices
-/// used internally in the ClipScrollTree to avoid having to do HashMap lookups. NodeIdToIndexMapper
+/// used internally in the SpatialTree to avoid having to do HashMap lookups. NodeIdToIndexMapper
 /// is responsible for mapping both ClipId to ClipChainIndex and SpatialId to SpatialNodeIndex.
 #[derive(Default)]
 pub struct NodeIdToIndexMapper {
@@ -245,6 +246,14 @@ struct ClipChainPairInfo {
     clip_chain_id: ClipChainId,
 }
 
+bitflags! {
+    /// Slice flags
+    pub struct SliceFlags : u8 {
+        /// Slice created by a cluster that has ClusterFlags::SCROLLBAR_CONTAINER
+        const IS_SCROLLBAR = 1;
+    }
+}
+
 /// Information about a set of primitive clusters that will form a picture cache slice.
 struct Slice {
     /// The spatial node root of the picture cache. If this is None, the slice
@@ -256,6 +265,8 @@ struct Slice {
     /// A list of clips that are shared by all primitives in the slice. These can be
     /// filtered out and applied when the tile cache is composited rather than per-item.
     shared_clips: Option<Vec<ClipDataHandle>>,
+    /// Various flags describing properties of this slice
+    pub flags: SliceFlags,
 }
 
 impl Slice {
@@ -270,7 +281,7 @@ impl Slice {
                     clip_chain_instance.clip_chain_id,
                     PrimitiveInstanceKind::PushClipChain,
                 ),
-                LayoutSize::zero(),
+                LayoutRect::zero(),
                 clip_chain_instance.spatial_node_index,
                 PrimitiveFlags::IS_BACKFACE_VISIBLE,
             );
@@ -288,7 +299,7 @@ impl Slice {
                     clip_chain_instance.clip_chain_id,
                     PrimitiveInstanceKind::PopClipChain,
                 ),
-                LayoutSize::zero(),
+                LayoutRect::zero(),
                 clip_chain_instance.spatial_node_index,
                 PrimitiveFlags::IS_BACKFACE_VISIBLE,
             );
@@ -311,7 +322,7 @@ pub struct SceneBuilder<'a> {
     output_pipelines: &'a FastHashSet<PipelineId>,
 
     /// The data structure that converts between ClipId/SpatialId and the various
-    /// index types that the ClipScrollTree uses.
+    /// index types that the SpatialTree uses.
     id_to_index_mapper: NodeIdToIndexMapper,
 
     /// A stack of stacking context properties.
@@ -323,8 +334,8 @@ pub struct SceneBuilder<'a> {
     /// The stack keeping track of the root clip chains associated with pipelines.
     pipeline_clip_chain_stack: Vec<ClipChainId>,
 
-    /// The ClipScrollTree that we are currently building during building.
-    pub clip_scroll_tree: ClipScrollTree,
+    /// The SpatialTree that we are currently building during building.
+    pub spatial_tree: SpatialTree,
 
     /// The store of primitives.
     pub prim_store: PrimitiveStore,
@@ -369,6 +380,9 @@ pub struct SceneBuilder<'a> {
     /// Gecko ever produces picture cache slices with complex transforms, so
     /// in future we should prevent this in the public API and remove this hack.
     picture_cache_spatial_nodes: FastHashSet<SpatialNodeIndex>,
+
+    /// The current quality / performance settings for this scene.
+    quality_settings: QualitySettings,
 }
 
 impl<'a> SceneBuilder<'a> {
@@ -391,7 +405,7 @@ impl<'a> SceneBuilder<'a> {
 
         let mut builder = SceneBuilder {
             scene,
-            clip_scroll_tree: ClipScrollTree::new(),
+            spatial_tree: SpatialTree::new(),
             font_instances,
             config: *frame_builder_config,
             output_pipelines,
@@ -410,6 +424,7 @@ impl<'a> SceneBuilder<'a> {
             iframe_depth: 0,
             content_slice_count: 0,
             picture_cache_spatial_nodes: FastHashSet::default(),
+            quality_settings: view.quality_settings,
         };
 
         let device_pixel_scale = view.accumulated_scale_factor_for_snapping();
@@ -456,11 +471,12 @@ impl<'a> SceneBuilder<'a> {
         debug_assert!(builder.sc_stack.is_empty());
 
         BuiltScene {
-            src: scene.clone(),
+            has_root_pipeline: scene.has_root_pipeline(),
+            pipeline_epochs: scene.pipeline_epochs.clone(),
             output_rect: view.device_rect.size.into(),
             background_color,
             hit_testing_scene: Arc::new(builder.hit_testing_scene),
-            clip_scroll_tree: builder.clip_scroll_tree,
+            spatial_tree: builder.spatial_tree,
             prim_store: builder.prim_store,
             clip_store: builder.clip_store,
             root_pic_index: builder.root_pic_index,
@@ -486,7 +502,7 @@ impl<'a> SceneBuilder<'a> {
             .external_scroll_mapper
             .external_scroll_offset(
                 spatial_node_index,
-                &self.clip_scroll_tree,
+                &self.spatial_tree,
             );
 
         rf_offset + scroll_offset
@@ -539,10 +555,16 @@ impl<'a> SceneBuilder<'a> {
                     prev_slice.pop_clip_instances(&clip_chain_instance_stack);
                 }
 
+                let slice_flags = if cluster.flags.contains(ClusterFlags::SCROLLBAR_CONTAINER) {
+                    SliceFlags::IS_SCROLLBAR
+                } else {
+                    SliceFlags::empty()
+                };
                 let mut slice = Slice {
                     cache_scroll_root: cluster.cache_scroll_root,
                     prim_list: PrimitiveList::empty(),
                     shared_clips: None,
+                    flags: slice_flags
                 };
 
                 // Open up clip chains on the stack on the new slice
@@ -656,19 +678,21 @@ impl<'a> SceneBuilder<'a> {
 
             let instance = create_tile_cache(
                 slice_index,
+                slice.flags,
                 scroll_root,
                 slice.prim_list,
                 background_color,
-                slice.shared_clips.unwrap_or(Vec::new()),
+                slice.shared_clips.unwrap_or_else(Vec::new),
                 &mut self.interners,
                 &mut self.prim_store,
                 &mut self.clip_store,
                 &mut self.picture_cache_spatial_nodes,
+                &self.config,
             );
 
             main_prim_list.add_prim(
                 instance,
-                LayoutSize::zero(),
+                LayoutRect::zero(),
                 scroll_root,
                 PrimitiveFlags::IS_BACKFACE_VISIBLE,
             );
@@ -682,23 +706,45 @@ impl<'a> SceneBuilder<'a> {
         apply_pipeline_clip: bool,
     ) {
         loop {
-            let subtraversal = {
-                let item = match traversal.next() {
-                    Some(item) => item,
-                    None => break,
-                };
+            let item = match traversal.next() {
+                Some(item) => item,
+                None => break,
+            };
 
-                match item.item() {
-                    DisplayItem::PopReferenceFrame |
-                    DisplayItem::PopStackingContext => return,
-                    _ => (),
+            let subtraversal = match item.item() {
+                DisplayItem::PushStackingContext(ref info) => {
+                    let space = self.get_space(&info.spatial_id);
+                    let mut subtraversal = item.sub_iter();
+                    self.build_stacking_context(
+                        &mut subtraversal,
+                        pipeline_id,
+                        &info.stacking_context,
+                        space,
+                        info.origin,
+                        item.filters(),
+                        &item.filter_datas(),
+                        item.filter_primitives(),
+                        info.prim_flags,
+                        apply_pipeline_clip,
+                    );
+                    Some(subtraversal)
                 }
-
-                self.build_item(
-                    item,
-                    pipeline_id,
-                    apply_pipeline_clip,
-                )
+                DisplayItem::PushReferenceFrame(ref info) => {
+                    let parent_space = self.get_space(&info.parent_spatial_id);
+                    let mut subtraversal = item.sub_iter();
+                    self.build_reference_frame(
+                        &mut subtraversal,
+                        pipeline_id,
+                        parent_space,
+                        info.origin,
+                        &info.reference_frame,
+                        apply_pipeline_clip,
+                    );
+                    Some(subtraversal)
+                }
+                DisplayItem::PopReferenceFrame |
+                DisplayItem::PopStackingContext => return,
+                _ => None,
             };
 
             // If build_item created a sub-traversal, we need `traversal` to have the
@@ -706,6 +752,8 @@ impl<'a> SceneBuilder<'a> {
             if let Some(mut subtraversal) = subtraversal {
                 subtraversal.merge_debug_stats_from(traversal);
                 *traversal = subtraversal;
+            } else {
+                self.build_item(item, pipeline_id, apply_pipeline_clip);
             }
         }
 
@@ -722,7 +770,7 @@ impl<'a> SceneBuilder<'a> {
                     ((stats.num_bytes as f32 / total_bytes.max(1) as f32) * 100.0) as usize,
                     stats.num_bytes / stats.total_count.max(1));
             }
-            println!("");
+            println!();
         }
     }
 
@@ -741,7 +789,7 @@ impl<'a> SceneBuilder<'a> {
             info.previously_applied_offset,
         );
 
-        let index = self.clip_scroll_tree.add_sticky_frame(
+        let index = self.spatial_tree.add_sticky_frame(
             parent_node_index,
             sticky_frame_info,
             info.id.pipeline_id(),
@@ -919,7 +967,7 @@ impl<'a> SceneBuilder<'a> {
         let snap_to_device = &mut self.sc_stack.last_mut().unwrap().snap_to_device;
         snap_to_device.set_target_spatial_node(
             spatial_node_index,
-            &self.clip_scroll_tree,
+            &self.spatial_tree,
         );
 
         let bounds = snap_to_device.snap_rect(
@@ -953,6 +1001,7 @@ impl<'a> SceneBuilder<'a> {
 
         self.rf_mapper.push_scope();
         self.iframe_depth += 1;
+
         self.build_items(
             &mut pipeline.display_list.iter(),
             pipeline.pipeline_id,
@@ -989,21 +1038,8 @@ impl<'a> SceneBuilder<'a> {
     fn process_common_properties(
         &mut self,
         common: &CommonItemProperties,
-        apply_pipeline_clip: bool
-    ) -> (LayoutPrimitiveInfo, ScrollNodeAndClipChain) {
-        let (layout, _, clip_and_scroll) = self.process_common_properties_with_bounds(
-            common,
-            &common.clip_rect,
-            apply_pipeline_clip,
-        );
-        (layout, clip_and_scroll)
-    }
-
-    fn process_common_properties_with_bounds(
-        &mut self,
-        common: &CommonItemProperties,
-        bounds: &LayoutRect,
-        apply_pipeline_clip: bool
+        bounds: Option<&LayoutRect>,
+        apply_pipeline_clip: bool,
     ) -> (LayoutPrimitiveInfo, LayoutRect, ScrollNodeAndClipChain) {
         let clip_and_scroll = self.get_clip_and_scroll(
             &common.clip_id,
@@ -1016,20 +1052,42 @@ impl<'a> SceneBuilder<'a> {
         let snap_to_device = &mut self.sc_stack.last_mut().unwrap().snap_to_device;
         snap_to_device.set_target_spatial_node(
             clip_and_scroll.spatial_node_index,
-            &self.clip_scroll_tree
+            &self.spatial_tree
         );
 
-        let clip_rect = common.clip_rect.translate(current_offset);
-        let rect = bounds.translate(current_offset);
+        let unsnapped_clip_rect = common.clip_rect.translate(current_offset);
+        let clip_rect = snap_to_device.snap_rect(&unsnapped_clip_rect);
+
+        let unsnapped_rect = bounds.map(|bounds| {
+            bounds.translate(current_offset)
+        });
+
+        // If no bounds rect is given, default to clip rect.
+        let rect = unsnapped_rect.map_or(clip_rect, |bounds| {
+            snap_to_device.snap_rect(&bounds)
+        });
 
         let layout = LayoutPrimitiveInfo {
-            rect: snap_to_device.snap_rect(&rect),
-            clip_rect: snap_to_device.snap_rect(&clip_rect),
+            rect,
+            clip_rect,
             flags: common.flags,
             hit_info: common.hit_info,
         };
 
-        (layout, rect, clip_and_scroll)
+        (layout, unsnapped_rect.unwrap_or(unsnapped_clip_rect), clip_and_scroll)
+    }
+
+    fn process_common_properties_with_bounds(
+        &mut self,
+        common: &CommonItemProperties,
+        bounds: &LayoutRect,
+        apply_pipeline_clip: bool,
+    ) -> (LayoutPrimitiveInfo, LayoutRect, ScrollNodeAndClipChain) {
+        self.process_common_properties(
+            common,
+            Some(bounds),
+            apply_pipeline_clip,
+        )
     }
 
     pub fn snap_rect(
@@ -1040,17 +1098,17 @@ impl<'a> SceneBuilder<'a> {
         let snap_to_device = &mut self.sc_stack.last_mut().unwrap().snap_to_device;
         snap_to_device.set_target_spatial_node(
             target_spatial_node,
-            &self.clip_scroll_tree
+            &self.spatial_tree
         );
         snap_to_device.snap_rect(rect)
     }
 
     fn build_item<'b>(
         &'b mut self,
-        item: DisplayItemRef<'a, 'b>,
+        item: DisplayItemRef,
         pipeline_id: PipelineId,
         apply_pipeline_clip: bool,
-    ) -> Option<BuiltDisplayListIter<'a>> {
+    ) {
         match *item.item() {
             DisplayItem::Image(ref info) => {
                 let (layout, _, clip_and_scroll) = self.process_common_properties_with_bounds(
@@ -1114,6 +1172,12 @@ impl<'a> SceneBuilder<'a> {
                 );
             }
             DisplayItem::Text(ref info) => {
+                // TODO(aosmond): Snapping text primitives does not make much sense, given the
+                // primitive bounds and clip are supposed to be conservative, not definitive.
+                // E.g. they should be able to grow and not impact the output. However there
+                // are subtle interactions between the primitive origin and the glyph offset
+                // which appear to be significant (presumably due to some sort of accumulated
+                // error throughout the layers). We should fix this at some point.
                 let (layout, _, clip_and_scroll) = self.process_common_properties_with_bounds(
                     &info.common,
                     &info.bounds,
@@ -1130,8 +1194,9 @@ impl<'a> SceneBuilder<'a> {
                 );
             }
             DisplayItem::Rectangle(ref info) => {
-                let (layout, clip_and_scroll) = self.process_common_properties(
+                let (layout, _, clip_and_scroll) = self.process_common_properties_with_bounds(
                     &info.common,
+                    &info.bounds,
                     apply_pipeline_clip,
                 );
 
@@ -1142,20 +1207,22 @@ impl<'a> SceneBuilder<'a> {
                 );
             }
             DisplayItem::HitTest(ref info) => {
-                let (layout, clip_and_scroll) = self.process_common_properties(
+                let (layout, _, clip_and_scroll) = self.process_common_properties(
                     &info.common,
+                    None,
                     apply_pipeline_clip,
                 );
 
                 self.add_solid_rectangle(
                     clip_and_scroll,
                     &layout,
-                    ColorF::TRANSPARENT,
+                    PropertyBinding::Value(ColorF::TRANSPARENT),
                 );
             }
             DisplayItem::ClearRectangle(ref info) => {
-                let (layout, clip_and_scroll) = self.process_common_properties(
+                let (layout, _, clip_and_scroll) = self.process_common_properties_with_bounds(
                     &info.common,
+                    &info.bounds,
                     apply_pipeline_clip,
                 );
 
@@ -1244,6 +1311,39 @@ impl<'a> SceneBuilder<'a> {
                     prim_key_kind,
                 );
             }
+            DisplayItem::ConicGradient(ref info) => {
+                let (layout, unsnapped_rect, clip_and_scroll) = self.process_common_properties_with_bounds(
+                    &info.common,
+                    &info.bounds,
+                    apply_pipeline_clip,
+                );
+
+                let tile_size = process_repeat_size(
+                    &layout.rect,
+                    &unsnapped_rect,
+                    info.tile_size,
+                );
+
+                let prim_key_kind = self.create_conic_gradient_prim(
+                    &layout,
+                    info.gradient.center,
+                    info.gradient.angle,
+                    info.gradient.start_offset,
+                    info.gradient.end_offset,
+                    item.gradient_stops(),
+                    info.gradient.extend_mode,
+                    tile_size,
+                    info.tile_spacing,
+                    None,
+                );
+
+                self.add_nonshadowable_primitive(
+                    clip_and_scroll,
+                    &layout,
+                    Vec::new(),
+                    prim_key_kind,
+                );
+            }
             DisplayItem::BoxShadow(ref info) => {
                 let (layout, _, clip_and_scroll) = self.process_common_properties_with_bounds(
                     &info.common,
@@ -1275,36 +1375,6 @@ impl<'a> SceneBuilder<'a> {
                     info,
                     item.gradient_stops(),
                 );
-            }
-            DisplayItem::PushStackingContext(ref info) => {
-                let space = self.get_space(&info.spatial_id);
-                let mut subtraversal = item.sub_iter();
-                self.build_stacking_context(
-                    &mut subtraversal,
-                    pipeline_id,
-                    &info.stacking_context,
-                    space,
-                    info.origin,
-                    item.filters(),
-                    item.filter_datas(),
-                    item.filter_primitives(),
-                    info.prim_flags,
-                    apply_pipeline_clip,
-                );
-                return Some(subtraversal);
-            }
-            DisplayItem::PushReferenceFrame(ref info) => {
-                let parent_space = self.get_space(&info.parent_spatial_id);
-                let mut subtraversal = item.sub_iter();
-                self.build_reference_frame(
-                    &mut subtraversal,
-                    pipeline_id,
-                    parent_space,
-                    info.origin,
-                    &info.reference_frame,
-                    apply_pipeline_clip,
-                );
-                return Some(subtraversal);
             }
             DisplayItem::Iframe(ref info) => {
                 let space = self.get_space(&info.space_and_clip.spatial_id);
@@ -1408,8 +1478,9 @@ impl<'a> SceneBuilder<'a> {
                 );
             }
             DisplayItem::BackdropFilter(ref info) => {
-                let (layout, clip_and_scroll) = self.process_common_properties(
+                let (layout, _, clip_and_scroll) = self.process_common_properties(
                     &info.common,
+                    None,
                     apply_pipeline_clip,
                 );
 
@@ -1432,10 +1503,19 @@ impl<'a> SceneBuilder<'a> {
             DisplayItem::SetFilterData |
             DisplayItem::SetFilterPrimitives => {}
 
+            // Special items that are handled in the parent method
+            DisplayItem::PushStackingContext(..) |
+            DisplayItem::PushReferenceFrame(..) |
             DisplayItem::PopReferenceFrame |
             DisplayItem::PopStackingContext => {
                 unreachable!("Should have returned in parent method.")
             }
+
+            DisplayItem::ReuseItems(key) |
+            DisplayItem::RetainedItems(key) => {
+                unreachable!("Iterator logic error: {:?}", key);
+            }
+
             DisplayItem::PushShadow(info) => {
                 let clip_and_scroll = self.get_clip_and_scroll(
                     &info.space_and_clip.clip_id,
@@ -1449,8 +1529,6 @@ impl<'a> SceneBuilder<'a> {
                 self.pop_all_shadows();
             }
         }
-
-        None
     }
 
     // Given a list of clip sources, a positioning node and
@@ -1511,12 +1589,7 @@ impl<'a> SceneBuilder<'a> {
         let current_offset = self.current_offset(spatial_node_index);
         let interner = self.interners.as_mut();
         let prim_data_handle = interner
-            .intern(&prim_key, || {
-                PrimitiveSceneData {
-                    prim_size: info.rect.size,
-                    flags: info.flags,
-                }
-            });
+            .intern(&prim_key, || ());
 
         let instance_kind = P::make_instance_kind(
             prim_key,
@@ -1526,7 +1599,6 @@ impl<'a> SceneBuilder<'a> {
         );
 
         PrimitiveInstance::new(
-            info.rect.origin,
             info.clip_rect,
             instance_kind,
             clip_chain_id,
@@ -1577,7 +1649,7 @@ impl<'a> SceneBuilder<'a> {
     pub fn add_primitive_to_draw_list(
         &mut self,
         prim_instance: PrimitiveInstance,
-        prim_size: LayoutSize,
+        prim_rect: LayoutRect,
         spatial_node_index: SpatialNodeIndex,
         flags: PrimitiveFlags,
     ) {
@@ -1589,7 +1661,7 @@ impl<'a> SceneBuilder<'a> {
         let stacking_context = self.sc_stack.last_mut().unwrap();
         stacking_context.prim_list.add_prim(
             prim_instance,
-            prim_size,
+            prim_rect,
             spatial_node_index,
             flags,
         );
@@ -1680,7 +1752,7 @@ impl<'a> SceneBuilder<'a> {
         self.add_primitive_to_hit_testing_list(info, clip_and_scroll);
         self.add_primitive_to_draw_list(
             prim_instance,
-            info.rect.size,
+            info.rect,
             clip_and_scroll.spatial_node_index,
             info.flags,
         );
@@ -1855,7 +1927,7 @@ impl<'a> SceneBuilder<'a> {
                             );
                             stacking_context.prim_list.add_prim_to_start(
                                 prim,
-                                LayoutSize::zero(),
+                                LayoutRect::zero(),
                                 stacking_context.spatial_node_index,
                                 PrimitiveFlags::IS_BACKFACE_VISIBLE,
                             );
@@ -1866,7 +1938,7 @@ impl<'a> SceneBuilder<'a> {
                             );
                             stacking_context.prim_list.add_prim(
                                 prim,
-                                LayoutSize::zero(),
+                                LayoutRect::zero(),
                                 stacking_context.spatial_node_index,
                                 PrimitiveFlags::IS_BACKFACE_VISIBLE,
                             );
@@ -1882,7 +1954,12 @@ impl<'a> SceneBuilder<'a> {
                         // are scrollbars. Once this lands, we can simplify this logic considerably
                         // (and add a separate picture cache slice / OS layer for scroll bars).
                         if parent_sc.pipeline_id != stacking_context.pipeline_id && self.iframe_depth == 1 {
-                            self.content_slice_count = stacking_context.init_picture_caching(&self.clip_scroll_tree);
+                            self.content_slice_count = stacking_context.init_picture_caching(
+                                &self.spatial_tree,
+                                &self.clip_store,
+                                &self.interners,
+                                &self.quality_settings,
+                            );
 
                             // Mark that a user supplied tile cache was specified.
                             self.picture_caching_initialized = true;
@@ -1910,7 +1987,12 @@ impl<'a> SceneBuilder<'a> {
             // on the root stacking context. This can happen in Gecko when the parent process
             // provides the content display list (e.g. about:support, about:config etc).
             if !self.picture_caching_initialized {
-                self.content_slice_count = stacking_context.init_picture_caching(&self.clip_scroll_tree);
+                self.content_slice_count = stacking_context.init_picture_caching(
+                    &self.spatial_tree,
+                    &self.clip_store,
+                    &self.interners,
+                    &self.quality_settings,
+                );
                 self.picture_caching_initialized = true;
             }
 
@@ -1970,7 +2052,6 @@ impl<'a> SceneBuilder<'a> {
         let mut cur_instance = create_prim_instance(
             leaf_pic_index,
             leaf_composite_mode.into(),
-            stacking_context.prim_flags,
             ClipChainId::NONE,
             &mut self.interners,
         );
@@ -1993,7 +2074,7 @@ impl<'a> SceneBuilder<'a> {
             for ext_prim in prims.drain(..) {
                 prim_list.add_prim(
                     ext_prim.instance,
-                    LayoutSize::zero(),
+                    LayoutRect::zero(),
                     ext_prim.spatial_node_index,
                     ext_prim.flags,
                 );
@@ -2022,7 +2103,6 @@ impl<'a> SceneBuilder<'a> {
             cur_instance = create_prim_instance(
                 current_pic_index,
                 PictureCompositeKey::Identity,
-                stacking_context.prim_flags,
                 ClipChainId::NONE,
                 &mut self.interners,
             );
@@ -2061,7 +2141,7 @@ impl<'a> SceneBuilder<'a> {
             let mut prim_list = PrimitiveList::empty();
             prim_list.add_prim(
                 cur_instance.clone(),
-                LayoutSize::zero(),
+                LayoutRect::zero(),
                 stacking_context.spatial_node_index,
                 stacking_context.prim_flags,
             );
@@ -2086,7 +2166,6 @@ impl<'a> SceneBuilder<'a> {
             cur_instance = create_prim_instance(
                 blend_pic_index,
                 composite_mode.into(),
-                stacking_context.prim_flags,
                 ClipChainId::NONE,
                 &mut self.interners,
             );
@@ -2121,7 +2200,7 @@ impl<'a> SceneBuilder<'a> {
                 }
                 parent_sc.prim_list.add_prim(
                     cur_instance,
-                    LayoutSize::zero(),
+                    LayoutRect::zero(),
                     stacking_context.spatial_node_index,
                     stacking_context.prim_flags,
                 );
@@ -2160,7 +2239,7 @@ impl<'a> SceneBuilder<'a> {
         kind: ReferenceFrameKind,
         origin_in_parent_reference_frame: LayoutVector2D,
     ) -> SpatialNodeIndex {
-        let index = self.clip_scroll_tree.add_reference_frame(
+        let index = self.spatial_tree.add_reference_frame(
             parent_index,
             transform_style,
             source_transform,
@@ -2203,7 +2282,7 @@ impl<'a> SceneBuilder<'a> {
             spatial_node_index,
             ROOT_SPATIAL_NODE_INDEX,
             device_pixel_scale,
-            &self.clip_scroll_tree,
+            &self.spatial_tree,
         );
 
         let content_size = snap_to_device.snap_size(content_size);
@@ -2244,7 +2323,7 @@ impl<'a> SceneBuilder<'a> {
         let snap_to_device = &mut self.sc_stack.last_mut().unwrap().snap_to_device;
         snap_to_device.set_target_spatial_node(
             spatial_node_index,
-            &self.clip_scroll_tree,
+            &self.spatial_tree,
         );
 
         let snapped_clip_rect = snap_to_device.snap_rect(&clip_region.main);
@@ -2357,7 +2436,7 @@ impl<'a> SceneBuilder<'a> {
         frame_kind: ScrollFrameKind,
         external_scroll_offset: LayoutVector2D,
     ) -> SpatialNodeIndex {
-        let node_index = self.clip_scroll_tree.add_scroll_frame(
+        let node_index = self.spatial_tree.add_scroll_frame(
             parent_node_index,
             external_id,
             pipeline_id,
@@ -2480,8 +2559,7 @@ impl<'a> SceneBuilder<'a> {
                         // blur radius is 0, the code in Picture::prepare_for_render will
                         // detect this and mark the picture to be drawn directly into the
                         // parent picture, which avoids an intermediate surface and blur.
-                        let mut blur_filter = Filter::Blur(std_deviation);
-                        blur_filter.sanitize();
+                        let blur_filter = Filter::Blur(std_deviation);
                         let composite_mode = PictureCompositeMode::Filter(blur_filter);
                         let composite_mode_key = Some(composite_mode.clone()).into();
 
@@ -2509,23 +2587,14 @@ impl<'a> SceneBuilder<'a> {
                         );
 
                         let shadow_pic_key = PictureKey::new(
-                            PrimitiveFlags::IS_BACKFACE_VISIBLE,
-                            LayoutSize::zero(),
                             Picture { composite_mode_key },
                         );
 
                         let shadow_prim_data_handle = self.interners
                             .picture
-                            .intern(&shadow_pic_key, || {
-                                PrimitiveSceneData {
-                                    prim_size: LayoutSize::zero(),
-                                    flags: PrimitiveFlags::IS_BACKFACE_VISIBLE,
-                                }
-                            }
-                        );
+                            .intern(&shadow_pic_key, || ());
 
                         let shadow_prim_instance = PrimitiveInstance::new(
-                            LayoutPoint::zero(),
                             LayoutRect::max_rect(),
                             PrimitiveInstanceKind::Picture {
                                 data_handle: shadow_prim_data_handle,
@@ -2539,7 +2608,7 @@ impl<'a> SceneBuilder<'a> {
                         // picture on to the shadow stack, to avoid infinite recursion!
                         self.add_primitive_to_draw_list(
                             shadow_prim_instance,
-                            LayoutSize::zero(),
+                            LayoutRect::zero(),
                             pending_shadow.clip_and_scroll.spatial_node_index,
                             PrimitiveFlags::IS_BACKFACE_VISIBLE,
                         );
@@ -2590,7 +2659,7 @@ impl<'a> SceneBuilder<'a> {
         let snap_to_device = &mut self.sc_stack.last_mut().unwrap().snap_to_device;
         snap_to_device.set_target_spatial_node(
             pending_primitive.clip_and_scroll.spatial_node_index,
-            &self.clip_scroll_tree,
+            &self.spatial_tree,
         );
 
         // Offset the local rect and clip rect by the shadow offset. The pending
@@ -2617,7 +2686,7 @@ impl<'a> SceneBuilder<'a> {
         // Add the new primitive to the shadow picture.
         prim_list.add_prim(
             shadow_prim_instance,
-            info.rect.size,
+            info.rect,
             pending_primitive.clip_and_scroll.spatial_node_index,
             info.flags,
         );
@@ -2666,13 +2735,19 @@ impl<'a> SceneBuilder<'a> {
         &mut self,
         clip_and_scroll: ScrollNodeAndClipChain,
         info: &LayoutPrimitiveInfo,
-        color: ColorF,
+        color: PropertyBinding<ColorF>,
     ) {
-        if color.a == 0.0 {
-            // Don't add transparent rectangles to the draw list, but do consider them for hit
-            // testing. This allows specifying invisible hit testing areas.
-            self.add_primitive_to_hit_testing_list(info, clip_and_scroll);
-            return;
+        match color {
+            PropertyBinding::Value(value) => {
+                if value.a == 0.0 {
+                    // Don't add transparent rectangles to the draw list,
+                    // but do consider them for hit testing. This allows
+                    // specifying invisible hit testing areas.
+                    self.add_primitive_to_hit_testing_list(info, clip_and_scroll);
+                    return;
+                }
+            },
+            PropertyBinding::Binding(..) => {},
         }
 
         self.add_primitive(
@@ -2712,33 +2787,28 @@ impl<'a> SceneBuilder<'a> {
         // pixel ratio or transform.
         let mut info = info.clone();
 
-        let size = get_line_decoration_sizes(
+        let size = get_line_decoration_size(
             &info.rect.size,
             orientation,
             style,
             wavy_line_thickness,
         );
 
-        let cache_key = size.map(|(inline_size, block_size)| {
-            let size = match orientation {
-                LineOrientation::Horizontal => LayoutSize::new(inline_size, block_size),
-                LineOrientation::Vertical => LayoutSize::new(block_size, inline_size),
-            };
-
+        let cache_key = size.map(|size| {
             // If dotted, adjust the clip rect to ensure we don't draw a final
             // partial dot.
             if style == LineStyle::Dotted {
                 let clip_size = match orientation {
                     LineOrientation::Horizontal => {
                         LayoutSize::new(
-                            inline_size * (info.rect.size.width / inline_size).floor(),
+                            size.width * (info.rect.size.width / size.width).floor(),
                             info.rect.size.height,
                         )
                     }
                     LineOrientation::Vertical => {
                         LayoutSize::new(
                             info.rect.size.width,
-                            inline_size * (info.rect.size.height / inline_size).floor(),
+                            size.height * (info.rect.size.height / size.height).floor(),
                         )
                     }
                 };
@@ -2837,6 +2907,27 @@ impl<'a> SceneBuilder<'a> {
                             gradient.start_offset * gradient.radius.width,
                             gradient.end_offset * gradient.radius.width,
                             gradient.radius.width / gradient.radius.height,
+                            gradient_stops,
+                            gradient.extend_mode,
+                            LayoutSize::new(border.height as f32, border.width as f32),
+                            LayoutSize::zero(),
+                            Some(Box::new(nine_patch)),
+                        );
+
+                        self.add_nonshadowable_primitive(
+                            clip_and_scroll,
+                            info,
+                            Vec::new(),
+                            prim,
+                        );
+                    }
+                    NinePatchBorderSource::ConicGradient(gradient) => {
+                        let prim = self.create_conic_gradient_prim(
+                            &info,
+                            gradient.center,
+                            gradient.angle,
+                            gradient.start_offset,
+                            gradient.end_offset,
                             gradient_stops,
                             gradient.extend_mode,
                             LayoutSize::new(border.height as f32, border.width as f32),
@@ -2957,6 +3048,40 @@ impl<'a> SceneBuilder<'a> {
             extend_mode,
             center: center.into(),
             params,
+            stretch_size: stretch_size.into(),
+            tile_spacing: tile_spacing.into(),
+            nine_patch,
+            stops,
+        }
+    }
+
+    pub fn create_conic_gradient_prim(
+        &mut self,
+        info: &LayoutPrimitiveInfo,
+        center: LayoutPoint,
+        angle: f32,
+        start_offset: f32,
+        end_offset: f32,
+        stops: ItemRange<GradientStop>,
+        extend_mode: ExtendMode,
+        stretch_size: LayoutSize,
+        mut tile_spacing: LayoutSize,
+        nine_patch: Option<Box<NinePatchDescriptor>>,
+    ) -> ConicGradient {
+        let mut prim_rect = info.rect;
+        simplify_repeated_primitive(&stretch_size, &mut tile_spacing, &mut prim_rect);
+
+        let stops = stops.iter().map(|stop| {
+            GradientStopKey {
+                offset: stop.offset,
+                color: stop.color.into(),
+            }
+        }).collect();
+
+        ConicGradient {
+            extend_mode,
+            center: center.into(),
+            params: ConicGradientParams { angle, start_offset, end_offset },
             stretch_size: stretch_size.into(),
             tile_spacing: tile_spacing.into(),
             nine_patch,
@@ -3181,7 +3306,7 @@ impl<'a> SceneBuilder<'a> {
             let mut prim_list = PrimitiveList::empty();
             prim_list.add_prim(
                 instance,
-                LayoutSize::zero(),
+                LayoutRect::zero(),
                 backdrop_spatial_node_index,
                 prim_flags,
             );
@@ -3207,7 +3332,6 @@ impl<'a> SceneBuilder<'a> {
             instance = create_prim_instance(
                 backdrop_pic_index,
                 composite_mode.into(),
-                prim_flags,
                 clip_chain_id,
                 &mut self.interners,
             );
@@ -3262,7 +3386,7 @@ impl<'a> SceneBuilder<'a> {
             .prim_list
             .add_prim(
                 filtered_instance,
-                LayoutSize::zero(),
+                LayoutRect::zero(),
                 backdrop_spatial_node_index,
                 info.flags,
             );
@@ -3278,7 +3402,7 @@ impl<'a> SceneBuilder<'a> {
             if let Some((_, flattened_instance)) = flattened_items.take() {
                 sc.prim_list.add_prim(
                     flattened_instance,
-                    LayoutSize::zero(),
+                    LayoutRect::zero(),
                     spatial_node_index,
                     prim_flags,
                 );
@@ -3303,7 +3427,7 @@ impl<'a> SceneBuilder<'a> {
             .prim_list
             .add_prim(
                 instance,
-                LayoutSize::zero(),
+                LayoutRect::zero(),
                 spatial_node_index,
                 prim_flags,
             );
@@ -3332,8 +3456,6 @@ impl<'a> SceneBuilder<'a> {
         // For each filter, create a new image with that composite mode.
         let mut current_filter_data_index = 0;
         for filter in &mut filter_ops {
-            filter.sanitize();
-
             let composite_mode = Some(match *filter {
                 Filter::ComponentTransfer => {
                     let filter_data =
@@ -3369,7 +3491,7 @@ impl<'a> SceneBuilder<'a> {
             let mut prim_list = PrimitiveList::empty();
             prim_list.add_prim(
                 cur_instance.clone(),
-                LayoutSize::zero(),
+                LayoutRect::zero(),
                 spatial_node_index,
                 flags,
             );
@@ -3396,7 +3518,6 @@ impl<'a> SceneBuilder<'a> {
             cur_instance = create_prim_instance(
                 current_pic_index,
                 composite_mode.into(),
-                flags,
                 ClipChainId::NONE,
                 &mut self.interners,
             );
@@ -3440,7 +3561,7 @@ impl<'a> SceneBuilder<'a> {
             let mut prim_list = PrimitiveList::empty();
             prim_list.add_prim(
                 cur_instance.clone(),
-                LayoutSize::zero(),
+                LayoutRect::zero(),
                 spatial_node_index,
                 flags,
             );
@@ -3467,7 +3588,6 @@ impl<'a> SceneBuilder<'a> {
             cur_instance = create_prim_instance(
                 current_pic_index,
                 Some(composite_mode).into(),
-                flags,
                 ClipChainId::NONE,
                 &mut self.interners,
             );
@@ -3566,11 +3686,15 @@ impl FlattenedStackingContext {
     /// Set up appropriate cluster flags for picture caching on this stacking context.
     fn init_picture_caching(
         &mut self,
-        clip_scroll_tree: &ClipScrollTree,
+        spatial_tree: &SpatialTree,
+        clip_store: &ClipStore,
+        interners: &Interners,
+        quality_settings: &QualitySettings,
     ) -> usize {
         struct SliceInfo {
             cluster_index: usize,
             scroll_root: SpatialNodeIndex,
+            cluster_flags: ClusterFlags,
         }
 
         let mut content_slice_count = 0;
@@ -3578,25 +3702,85 @@ impl FlattenedStackingContext {
 
         // Step through each cluster, and work out where the slice boundaries should be.
         for (cluster_index, cluster) in self.prim_list.clusters.iter().enumerate() {
-            let scroll_root = clip_scroll_tree.find_scroll_root(
+            let scroll_root = spatial_tree.find_scroll_root(
                 cluster.spatial_node_index,
             );
 
             // We want to create a slice in the following conditions:
             // (1) This cluster is a scrollbar
-            // (2) This cluster begins a scroll root different from the current
+            // (2) Certain conditions when the scroll root changes (see below)
             // (3) No slice exists yet
-            let create_new_slice =
-                cluster.flags.contains(ClusterFlags::SCROLLBAR_CONTAINER) ||
+            let mut cluster_flags = ClusterFlags::empty();
+
+            if cluster.flags.contains(ClusterFlags::SCROLLBAR_CONTAINER) {
+                // Scrollbar containers need to ensure that a new slice is
+                // created both before and after the scrollbar, so that no
+                // other prims with the same scroll root sneak into this slice.
+                cluster_flags.insert(
+                    ClusterFlags::CREATE_PICTURE_CACHE_PRE |
+                    ClusterFlags::CREATE_PICTURE_CACHE_POST
+                );
+            }
+
+            let create_new_slice_for_scroll_root =
                 slices.last().map(|slice| {
-                    scroll_root != slice.scroll_root
+                    match (slice.scroll_root, scroll_root) {
+                        (ROOT_SPATIAL_NODE_INDEX, ROOT_SPATIAL_NODE_INDEX) => {
+                            // Both current slice and this cluster are fixed position, no need to cut
+                            false
+                        }
+                        (ROOT_SPATIAL_NODE_INDEX, _) => {
+                            // A real scroll root is being established, so create a cache slice
+                            true
+                        }
+                        (_, ROOT_SPATIAL_NODE_INDEX) => {
+                            // If quality settings prefer subpixel AA over performance, skip creating
+                            // a slice for the fixed position element(s) here.
+                            if !quality_settings.allow_sacrificing_subpixel_aa {
+                                return false;
+                            }
+
+                            // A fixed position slice is encountered within a scroll root. Only create
+                            // a slice in this case if all the clips referenced by this cluster are also
+                            // fixed position. There's no real point in creating slices for these cases,
+                            // since we'll have to rasterize them as the scrolling clip moves anyway. It
+                            // also allows us to retain subpixel AA in these cases. For these types of
+                            // slices, the intra-slice dirty rect handling typically works quite well
+                            // (a common case is parallax scrolling effects).
+                            for prim_instance in &cluster.prim_instances {
+                                let mut current_clip_chain_id = prim_instance.clip_chain_id;
+
+                                while current_clip_chain_id != ClipChainId::NONE {
+                                    let clip_chain_node = &clip_store
+                                        .clip_chain_nodes[current_clip_chain_id.0 as usize];
+                                    let clip_node_data = &interners.clip[clip_chain_node.handle];
+                                    let spatial_root = spatial_tree.find_scroll_root(clip_node_data.spatial_node_index);
+                                    if spatial_root != ROOT_SPATIAL_NODE_INDEX {
+                                        return false;
+                                    }
+                                    current_clip_chain_id = clip_chain_node.parent_clip_chain_id;
+                                }
+                            }
+
+                            true
+                        }
+                        (curr_scroll_root, scroll_root) => {
+                            // Two scrolling roots - only need a new slice if they differ
+                            curr_scroll_root != scroll_root
+                        }
+                    }
                 }).unwrap_or(true);
 
+            if create_new_slice_for_scroll_root {
+                cluster_flags.insert(ClusterFlags::CREATE_PICTURE_CACHE_PRE);
+            }
+
             // Create a new slice if required
-            if create_new_slice {
+            if !cluster_flags.is_empty() {
                 slices.push(SliceInfo {
                     cluster_index,
-                    scroll_root
+                    scroll_root,
+                    cluster_flags,
                 });
             }
         }
@@ -3623,7 +3807,7 @@ impl FlattenedStackingContext {
                 content_slice_count += 1;
                 let cluster = &mut self.prim_list.clusters[slice.cluster_index];
                 // Mark that this cluster creates a picture cache slice
-                cluster.flags.insert(ClusterFlags::CREATE_PICTURE_CACHE_PRE);
+                cluster.flags.insert(slice.cluster_flags);
                 cluster.cache_scroll_root = Some(slice.scroll_root);
             }
         }
@@ -3659,7 +3843,7 @@ impl FlattenedStackingContext {
 
         // We can skip mix-blend modes if they are the first primitive in a stacking context,
         // see pop_stacking_context for a full explanation.
-        if !self.composite_ops.mix_blend_mode.is_none() &&
+        if self.composite_ops.mix_blend_mode.is_some() &&
             !parent.prim_list.is_empty() {
             return false;
         }
@@ -3719,7 +3903,6 @@ impl FlattenedStackingContext {
         let prim_instance = create_prim_instance(
             pic_index,
             composite_mode.into(),
-            self.prim_flags,
             self.clip_chain_id,
             interners,
         );
@@ -3787,28 +3970,18 @@ impl From<PendingPrimitive<TextRun>> for ShadowItem {
 fn create_prim_instance(
     pic_index: PictureIndex,
     composite_mode_key: PictureCompositeKey,
-    flags: PrimitiveFlags,
     clip_chain_id: ClipChainId,
     interners: &mut Interners,
 ) -> PrimitiveInstance {
     let pic_key = PictureKey::new(
-        flags,
-        LayoutSize::zero(),
         Picture { composite_mode_key },
     );
 
     let data_handle = interners
         .picture
-        .intern(&pic_key, || {
-            PrimitiveSceneData {
-                prim_size: LayoutSize::zero(),
-                flags,
-            }
-        }
-    );
+        .intern(&pic_key, || ());
 
     PrimitiveInstance::new(
-        LayoutPoint::zero(),
         LayoutRect::max_rect(),
         PrimitiveInstanceKind::Picture {
             data_handle,
@@ -3824,7 +3997,6 @@ fn create_clip_prim_instance(
     kind: PrimitiveInstanceKind,
 ) -> PrimitiveInstance {
     PrimitiveInstance::new(
-        LayoutPoint::zero(),
         LayoutRect::max_rect(),
         kind,
         clip_chain_id,
@@ -3872,7 +4044,7 @@ fn filter_primitives_for_compositing(
     // TODO(gw): Now that we resolve these later on,
     //           we could probably make it a bit
     //           more efficient than cloning these here.
-    input_filter_primitives.iter().map(|primitive| primitive.into()).collect()
+    input_filter_primitives.iter().map(|primitive| primitive).collect()
 }
 
 fn process_repeat_size(
@@ -3880,13 +4052,21 @@ fn process_repeat_size(
     unsnapped_rect: &LayoutRect,
     repeat_size: LayoutSize,
 ) -> LayoutSize {
+    // FIXME(aosmond): The tile size is calculated based on several parameters
+    // during display list building. It may produce a slightly different result
+    // than the bounds due to floating point error accumulation, even though in
+    // theory they should be the same. We do a fuzzy check here to paper over
+    // that. It may make more sense to push the original parameters into scene
+    // building and let it do a saner calculation with more information (e.g.
+    // the snapped values).
+    const EPSILON: f32 = 0.001;
     LayoutSize::new(
-        if repeat_size.width == unsnapped_rect.size.width {
+        if repeat_size.width.approx_eq_eps(&unsnapped_rect.size.width, &EPSILON) {
             snapped_rect.size.width
         } else {
             repeat_size.width
         },
-        if repeat_size.height == unsnapped_rect.size.height {
+        if repeat_size.height.approx_eq_eps(&unsnapped_rect.size.height, &EPSILON) {
             snapped_rect.size.height
         } else {
             repeat_size.height
@@ -3898,6 +4078,7 @@ fn process_repeat_size(
 /// that wraps the primitive list.
 fn create_tile_cache(
     slice: usize,
+    slice_flags: SliceFlags,
     scroll_root: SpatialNodeIndex,
     prim_list: PrimitiveList,
     background_color: Option<ColorF>,
@@ -3906,6 +4087,7 @@ fn create_tile_cache(
     prim_store: &mut PrimitiveStore,
     clip_store: &mut ClipStore,
     picture_cache_spatial_nodes: &mut FastHashSet<SpatialNodeIndex>,
+    frame_builder_config: &FrameBuilderConfig,
 ) -> PrimitiveInstance {
     // Add this spatial node to the list to check for complex transforms
     // at the start of a frame build.
@@ -3914,8 +4096,6 @@ fn create_tile_cache(
     // Now, create a picture with tile caching enabled that will hold all
     // of the primitives selected as belonging to the main scroll root.
     let pic_key = PictureKey::new(
-        PrimitiveFlags::IS_BACKFACE_VISIBLE,
-        LayoutSize::zero(),
         Picture {
             composite_mode_key: PictureCompositeKey::Identity,
         },
@@ -3923,13 +4103,7 @@ fn create_tile_cache(
 
     let pic_data_handle = interners
         .picture
-        .intern(&pic_key, || {
-            PrimitiveSceneData {
-                prim_size: LayoutSize::zero(),
-                flags: PrimitiveFlags::IS_BACKFACE_VISIBLE,
-            }
-        }
-        );
+        .intern(&pic_key, || ());
 
     // Build a clip-chain for the tile cache, that contains any of the shared clips
     // we will apply when drawing the tiles. In all cases provided by Gecko, these
@@ -3952,10 +4126,12 @@ fn create_tile_cache(
 
     let tile_cache = Box::new(TileCacheInstance::new(
         slice,
+        slice_flags,
         scroll_root,
         background_color,
         shared_clips,
         parent_clip_chain_id,
+        frame_builder_config,
     ));
 
     let pic_index = prim_store.pictures.alloc().init(PicturePrimitive::new_image(
@@ -3972,7 +4148,6 @@ fn create_tile_cache(
     ));
 
     PrimitiveInstance::new(
-        LayoutPoint::zero(),
         LayoutRect::max_rect(),
         PrimitiveInstanceKind::Picture {
             data_handle: pic_data_handle,

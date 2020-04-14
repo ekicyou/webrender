@@ -68,7 +68,7 @@ impl<'a> RawtestHarness<'a> {
 
         match image1.compare(&image2) {
             ReftestImageComparison::Equal => {}
-            ReftestImageComparison::NotEqual { max_difference, count_different } => {
+            ReftestImageComparison::NotEqual { max_difference, count_different, .. } => {
                 let t = "rawtest";
                 println!(
                     "{} | {} | {}: {}, {}: {}",
@@ -153,7 +153,7 @@ impl<'a> RawtestHarness<'a> {
         // Start with a non-tiled image.
         txn.add_image(
             img,
-            ImageDescriptor::new(64, 64, ImageFormat::BGRA8, true, false),
+            ImageDescriptor::new(64, 64, ImageFormat::BGRA8, ImageDescriptorFlags::IS_OPAQUE),
             ImageData::new(vec![255; 64 * 64 * 4]),
             None,
         );
@@ -180,7 +180,7 @@ impl<'a> RawtestHarness<'a> {
         // Resize the image to something bigger than the max texture size (8196) to force tiling.
         txn.update_image(
             img,
-            ImageDescriptor::new(8200, 32, ImageFormat::BGRA8, true, false),
+            ImageDescriptor::new(8200, 32, ImageFormat::BGRA8, ImageDescriptorFlags::IS_OPAQUE),
             ImageData::new(vec![255; 8200 * 32 * 4]),
             &DirtyRect::All,
         );
@@ -204,7 +204,7 @@ impl<'a> RawtestHarness<'a> {
         // Resize back to something doesn't require tiling.
         txn.update_image(
             img,
-            ImageDescriptor::new(64, 64, ImageFormat::BGRA8, true, false),
+            ImageDescriptor::new(64, 64, ImageFormat::BGRA8, ImageDescriptorFlags::IS_OPAQUE),
             ImageData::new(vec![64; 64 * 64 * 4]),
             &DirtyRect::All,
         );
@@ -239,7 +239,7 @@ impl<'a> RawtestHarness<'a> {
         let blob_img = self.wrench.api.generate_blob_image_key();
         txn.add_blob_image(
             blob_img,
-            ImageDescriptor::new(151, 56, ImageFormat::BGRA8, true, false),
+            ImageDescriptor::new(151, 56, ImageFormat::BGRA8, ImageDescriptorFlags::IS_OPAQUE),
             blob::serialize_blob(ColorU::new(50, 50, 150, 255)),
             rect(0, 0, 151, 56),
             Some(128),
@@ -296,7 +296,7 @@ impl<'a> RawtestHarness<'a> {
         let blob_img = self.wrench.api.generate_blob_image_key();
         txn.add_blob_image(
             blob_img,
-            ImageDescriptor::new(15000, 15000, ImageFormat::BGRA8, false, false),
+            ImageDescriptor::new(15000, 15000, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
             blob::serialize_blob(ColorU::new(50, 50, 150, 255)),
             rect(0, 0, 15000, 15000),
             Some(100),
@@ -386,7 +386,7 @@ impl<'a> RawtestHarness<'a> {
         let blob_img = self.wrench.api.generate_blob_image_key();
         txn.add_blob_image(
             blob_img,
-            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, false, false),
+            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
             blob::serialize_blob(ColorU::new(50, 50, 150, 255)),
             DeviceIntRect {
                 origin: point2(50, 20),
@@ -485,7 +485,7 @@ impl<'a> RawtestHarness<'a> {
         let blob_img = self.wrench.api.generate_blob_image_key();
         txn.add_blob_image(
             blob_img,
-            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, false, false),
+            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
             blob::serialize_blob(ColorU::new(50, 50, 150, 255)),
             DeviceIntRect {
                 origin: point2(0, 0),
@@ -581,7 +581,7 @@ impl<'a> RawtestHarness<'a> {
         let blob_img2 = self.wrench.api.generate_blob_image_key();
         txn.add_blob_image(
             blob_img2,
-            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, false, false),
+            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
             blob::serialize_blob(ColorU::new(50, 50, 150, 255)),
             DeviceIntRect {
                 origin: point2(50, 50),
@@ -652,7 +652,7 @@ impl<'a> RawtestHarness<'a> {
         let blob_img = self.wrench.api.generate_blob_image_key();
         txn.add_blob_image(
             blob_img,
-            ImageDescriptor::new(1510, 1510, ImageFormat::BGRA8, false, false),
+            ImageDescriptor::new(1510, 1510, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
             blob::serialize_blob(ColorU::new(50, 50, 150, 255)),
             rect(0, 0, 1510, 1510),
             None,
@@ -710,7 +710,7 @@ impl<'a> RawtestHarness<'a> {
 
         txn.update_blob_image(
             blob_img,
-            ImageDescriptor::new(1510, 1510, ImageFormat::BGRA8, false, false),
+            ImageDescriptor::new(1510, 1510, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
             blob::serialize_blob(ColorU::new(50, 50, 150, 255)),
             rect(0, 0, 1510, 1510),
             &rect(10, 10, 100, 100).into(),
@@ -768,7 +768,7 @@ impl<'a> RawtestHarness<'a> {
             blob_img = api.generate_blob_image_key();
             txn.add_blob_image(
                 blob_img,
-                ImageDescriptor::new(500, 500, ImageFormat::BGRA8, false, false),
+                ImageDescriptor::new(500, 500, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
                 blob::serialize_blob(ColorU::new(50, 50, 150, 255)),
                 rect(0, 0, 500, 500),
                 None,
@@ -854,7 +854,7 @@ impl<'a> RawtestHarness<'a> {
             blob_img = api.generate_blob_image_key();
             txn.add_blob_image(
                 blob_img,
-                ImageDescriptor::new(500, 500, ImageFormat::BGRA8, false, false),
+                ImageDescriptor::new(500, 500, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
                 blob::serialize_blob(ColorU::new(50, 50, 150, 255)),
                 rect(0, 0, 500, 500),
                 None,
@@ -862,7 +862,7 @@ impl<'a> RawtestHarness<'a> {
             blob_img2 = api.generate_blob_image_key();
             txn.add_blob_image(
                 blob_img2,
-                ImageDescriptor::new(500, 500, ImageFormat::BGRA8, false, false),
+                ImageDescriptor::new(500, 500, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
                 blob::serialize_blob(ColorU::new(80, 50, 150, 255)),
                 rect(0, 0, 500, 500),
                 None,
@@ -922,14 +922,14 @@ impl<'a> RawtestHarness<'a> {
         let mut txn = Transaction::new();
         txn.update_blob_image(
             blob_img,
-            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, false, false),
+            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
             blob::serialize_blob(ColorU::new(50, 50, 150, 255)),
             rect(0, 0, 500, 500),
             &rect(100, 100, 100, 100).into(),
         );
         txn.update_blob_image(
             blob_img2,
-            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, false, false),
+            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
             blob::serialize_blob(ColorU::new(59, 50, 150, 255)),
             rect(0, 0, 500, 500),
             &rect(100, 100, 100, 100).into(),
@@ -944,7 +944,7 @@ impl<'a> RawtestHarness<'a> {
         let mut txn = Transaction::new();
         txn.update_blob_image(
             blob_img,
-            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, false, false),
+            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
             blob::serialize_blob(ColorU::new(50, 150, 150, 255)),
             rect(0, 0, 500, 500),
             &rect(200, 200, 100, 100).into(),
@@ -980,7 +980,7 @@ impl<'a> RawtestHarness<'a> {
             let img = self.wrench.api.generate_blob_image_key();
             txn.add_blob_image(
                 img,
-                ImageDescriptor::new(500, 500, ImageFormat::BGRA8, false, false),
+                ImageDescriptor::new(500, 500, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
                 blob::serialize_blob(ColorU::new(50, 50, 150, 255)),
                 rect(0, 0, 500, 500),
                 None,
@@ -1010,7 +1010,7 @@ impl<'a> RawtestHarness<'a> {
         let mut txn = Transaction::new();
         txn.update_blob_image(
             blob_img,
-            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, false, false),
+            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
             blob::serialize_blob(ColorU::new(50, 50, 150, 255)),
             rect(0, 0, 500, 500),
             &rect(100, 100, 100, 100).into(),
@@ -1035,7 +1035,7 @@ impl<'a> RawtestHarness<'a> {
         let mut txn = Transaction::new();
         txn.update_blob_image(
             blob_img,
-            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, false, false),
+            ImageDescriptor::new(500, 500, ImageFormat::BGRA8, ImageDescriptorFlags::empty()),
             blob::serialize_blob(ColorU::new(50, 150, 150, 255)),
             rect(0, 0, 500, 500),
             &rect(200, 200, 100, 100).into(),
@@ -1087,6 +1087,7 @@ impl<'a> RawtestHarness<'a> {
                     rect(100., 100., 100., 100.),
                     clip_id,
                     spatial_id),
+                rect(100., 100., 100., 100.),
                 ColorF::new(0.0, 0.0, 1.0, 1.0),
             );
 
@@ -1107,6 +1108,7 @@ impl<'a> RawtestHarness<'a> {
                         rect(110., 110., 50., 50.),
                         clip_id,
                         spatial_id),
+                    rect(110., 110., 50., 50.),
                     ColorF::new(0.0, 1.0, 0.0, 1.0),
                 );
                 builder.push_shadow(
@@ -1148,6 +1150,7 @@ impl<'a> RawtestHarness<'a> {
                         rect(150., 150., 100., 100.),
                         clip_id,
                         spatial_id),
+                    rect(150., 150., 100., 100.),
                     ColorF::new(0.0, 0.0, 1.0, 1.0),
                 );
                 builder.clear_save();
@@ -1234,7 +1237,7 @@ impl<'a> RawtestHarness<'a> {
         let image = self.wrench.api.generate_image_key();
         txn.add_image(
             image,
-            ImageDescriptor::new(1, 1, ImageFormat::BGRA8, true, false),
+            ImageDescriptor::new(1, 1, ImageFormat::BGRA8, ImageDescriptorFlags::IS_OPAQUE),
             ImageData::new(vec![0xFF, 0, 0, 0xFF]),
             None,
         );
@@ -1313,6 +1316,7 @@ impl<'a> RawtestHarness<'a> {
                                                             LayoutSize::new(100.0, 100.0)));
         builder.push_rect(
             &info,
+            info.clip_rect,
             ColorF::new(0.0, 1.0, 0.0, 1.0),
         );
 
@@ -1343,7 +1347,7 @@ impl<'a> RawtestHarness<'a> {
         // Add a rectangle that covers the entire scene.
         let mut info = self.make_common_properties(LayoutRect::new(LayoutPoint::zero(), layout_size));
         info.hit_info = Some((0, 1));
-        builder.push_rect(&info, ColorF::new(1.0, 1.0, 1.0, 1.0));
+        builder.push_rect(&info, info.clip_rect, ColorF::new(1.0, 1.0, 1.0, 1.0));
 
         // Add a simple 100x100 rectangle at 100,0.
         let mut info = self.make_common_properties(LayoutRect::new(
@@ -1351,7 +1355,7 @@ impl<'a> RawtestHarness<'a> {
             LayoutSize::new(100., 100.)
         ));
         info.hit_info = Some((0, 2));
-        builder.push_rect(&info, ColorF::new(1.0, 1.0, 1.0, 1.0));
+        builder.push_rect(&info, info.clip_rect, ColorF::new(1.0, 1.0, 1.0, 1.0));
 
         let space_and_clip = SpaceAndClipInfo::root_scroll(self.wrench.root_pipeline_id);
 
@@ -1379,6 +1383,7 @@ impl<'a> RawtestHarness<'a> {
                 spatial_id: space_and_clip.spatial_id,
                 flags: PrimitiveFlags::default(),
             },
+            rect,
             ColorF::new(1.0, 1.0, 1.0, 1.0),
         );
 
@@ -1399,6 +1404,7 @@ impl<'a> RawtestHarness<'a> {
                 spatial_id: space_and_clip.spatial_id,
                 flags: PrimitiveFlags::default(),
             },
+            rect,
             ColorF::new(1.0, 1.0, 1.0, 1.0),
         );
 

@@ -95,6 +95,7 @@ impl App {
                     clip_id,
                 }
             ),
+            LayoutRect::new(LayoutPoint::zero(), bounds.size),
             color,
         );
 
@@ -187,6 +188,7 @@ impl Example for App {
                                 value: self.opacity,
                             }
                         ],
+                        colors: vec![],
                     },
                 );
                 txn.generate_frame();

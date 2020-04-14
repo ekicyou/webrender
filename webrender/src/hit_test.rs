@@ -3,18 +3,54 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use api::{BorderRadius, ClipMode, HitTestFlags, HitTestItem, HitTestResult, ItemTag, PrimitiveFlags};
-use api::PipelineId;
+use api::{PipelineId, ApiHitTester};
 use api::units::*;
 use crate::clip::{ClipChainId, ClipDataStore, ClipNode, ClipItemKind, ClipStore};
 use crate::clip::{rounded_rectangle_contains_point};
-use crate::clip_scroll_tree::{SpatialNodeIndex, ClipScrollTree};
+use crate::spatial_tree::{SpatialNodeIndex, SpatialTree};
 use crate::internal_types::{FastHashMap, LayoutPrimitiveInfo};
 use std::{ops, u32};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use crate::util::LayoutToWorldFastTransform;
 
-/// A copy of important clip scroll node data to use during hit testing. This a copy of
-/// data from the ClipScrollTree that will persist as a new frame is under construction,
+pub struct SharedHitTester {
+    // We don't really need a mutex here. We could do with some sort of
+    // atomic-atomic-ref-counted pointer (an Arc which would let the pointer
+    // be swapped atomically like an AtomicPtr).
+    // In practive this shouldn't cause performance issues, though.
+    hit_tester: Mutex<Arc<HitTester>>,
+}
+
+impl SharedHitTester {
+    pub fn new() -> Self {
+        SharedHitTester {
+            hit_tester: Mutex::new(Arc::new(HitTester::empty())),
+        }
+    }
+
+    pub fn get_ref(&self) -> Arc<HitTester> {
+        let guard = self.hit_tester.lock().unwrap();
+        Arc::clone(&*guard)
+    }
+
+    pub(crate) fn update(&self, new_hit_tester: Arc<HitTester>) {
+        let mut guard = self.hit_tester.lock().unwrap();
+        *guard = new_hit_tester;
+    }
+}
+
+impl ApiHitTester for SharedHitTester {
+    fn hit_test(&self,
+        pipeline_id: Option<PipelineId>,
+        point: WorldPoint,
+        flags: HitTestFlags
+    ) -> HitTestResult {
+        self.get_ref().hit_test(HitTest::new(pipeline_id, point, flags))
+    }
+}
+
+/// A copy of important spatial node data to use during hit testing. This a copy of
+/// data from the SpatialTree that will persist as a new frame is under construction,
 /// allowing hit tests consistent with the currently rendered frame.
 #[derive(MallocSizeOf)]
 pub struct HitTestSpatialNode {
@@ -129,7 +165,7 @@ impl HitTestingSceneStats {
 
 /// Defines the immutable part of a hit tester for a given scene.
 /// The hit tester is recreated each time a frame is built, since
-/// it relies on the current values of the clip scroll tree.
+/// it relies on the current values of the spatial tree.
 /// However, the clip chain and item definitions don't change,
 /// so they are created once per scene, and shared between
 /// hit tester instances via Arc.
@@ -216,9 +252,18 @@ pub struct HitTester {
 }
 
 impl HitTester {
+    pub fn empty() -> Self {
+        HitTester {
+            scene: Arc::new(HitTestingScene::new(&HitTestingSceneStats::empty())),
+            spatial_nodes: Vec::new(),
+            clip_chains: Vec::new(),
+            pipeline_root_nodes: FastHashMap::default(),
+        }
+    }
+
     pub fn new(
         scene: Arc<HitTestingScene>,
-        clip_scroll_tree: &ClipScrollTree,
+        spatial_tree: &SpatialTree,
         clip_store: &ClipStore,
         clip_data_store: &ClipDataStore,
     ) -> HitTester {
@@ -228,25 +273,25 @@ impl HitTester {
             clip_chains: Vec::new(),
             pipeline_root_nodes: FastHashMap::default(),
         };
-        hit_tester.read_clip_scroll_tree(
-            clip_scroll_tree,
+        hit_tester.read_spatial_tree(
+            spatial_tree,
             clip_store,
             clip_data_store,
         );
         hit_tester
     }
 
-    fn read_clip_scroll_tree(
+    fn read_spatial_tree(
         &mut self,
-        clip_scroll_tree: &ClipScrollTree,
+        spatial_tree: &SpatialTree,
         clip_store: &ClipStore,
         clip_data_store: &ClipDataStore,
     ) {
         self.spatial_nodes.clear();
         self.clip_chains.clear();
 
-        self.spatial_nodes.reserve(clip_scroll_tree.spatial_nodes.len());
-        for (index, node) in clip_scroll_tree.spatial_nodes.iter().enumerate() {
+        self.spatial_nodes.reserve(spatial_tree.spatial_nodes.len());
+        for (index, node) in spatial_tree.spatial_nodes.iter().enumerate() {
             let index = SpatialNodeIndex::new(index);
 
             // If we haven't already seen a node for this pipeline, record this one as the root
@@ -259,13 +304,13 @@ impl HitTester {
 
             self.spatial_nodes.push(HitTestSpatialNode {
                 pipeline_id: node.pipeline_id,
-                world_content_transform: clip_scroll_tree
+                world_content_transform: spatial_tree
                     .get_world_transform(index)
                     .into_fast_transform(),
-                world_viewport_transform: clip_scroll_tree
+                world_viewport_transform: spatial_tree
                     .get_world_viewport_transform(index)
                     .into_fast_transform(),
-                external_scroll_offset: clip_scroll_tree.external_scroll_offset(index),
+                external_scroll_offset: spatial_tree.external_scroll_offset(index),
             });
         }
 

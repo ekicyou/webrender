@@ -20,6 +20,7 @@ use webrender::api::*;
 use webrender::api::units::*;
 #[cfg(target_os = "windows")]
 use compositor_windows as compositor;
+use std::{env, f32, process};
 
 // A very hacky integration with DirectComposite. It proxies calls from the compositor
 // interface to a simple C99 library which does the DirectComposition / D3D11 / ANGLE
@@ -41,14 +42,14 @@ impl webrender::Compositor for DirectCompositeInterface {
     fn create_surface(
         &mut self,
         id: webrender::NativeSurfaceId,
-        size: DeviceIntSize,
+        tile_size: DeviceIntSize,
         is_opaque: bool,
     ) {
         compositor::create_surface(
             self.window,
             id.0,
-            size.width,
-            size.height,
+            tile_size.width,
+            tile_size.height,
             is_opaque,
         );
     }
@@ -60,14 +61,40 @@ impl webrender::Compositor for DirectCompositeInterface {
         compositor::destroy_surface(self.window, id.0);
     }
 
+    fn create_tile(
+        &mut self,
+        id: webrender::NativeTileId,
+    ) {
+        compositor::create_tile(
+            self.window,
+            id.surface_id.0,
+            id.x,
+            id.y,
+        );
+    }
+
+    fn destroy_tile(
+        &mut self,
+        id: webrender::NativeTileId,
+    ) {
+        compositor::destroy_tile(
+            self.window,
+            id.surface_id.0,
+            id.x,
+            id.y,
+        );
+    }
+
     fn bind(
         &mut self,
-        id: webrender::NativeSurfaceId,
+        id: webrender::NativeTileId,
         dirty_rect: DeviceIntRect,
     ) -> webrender::NativeSurfaceInfo {
-        let (x, y) = compositor::bind_surface(
+        let (fbo_id, x, y) = compositor::bind_surface(
             self.window,
-            id.0,
+            id.surface_id.0,
+            id.x,
+            id.y,
             dirty_rect.origin.x,
             dirty_rect.origin.y,
             dirty_rect.size.width,
@@ -76,7 +103,7 @@ impl webrender::Compositor for DirectCompositeInterface {
 
         webrender::NativeSurfaceInfo {
             origin: DeviceIntPoint::new(x, y),
-            fbo_id: 0,
+            fbo_id,
         }
     }
 
@@ -144,19 +171,185 @@ impl RenderNotifier for Notifier {
     }
 }
 
+fn push_rotated_rect(
+    builder: &mut DisplayListBuilder,
+    rect: LayoutRect,
+    color: ColorF,
+    spatial_id: SpatialId,
+    root_pipeline_id: PipelineId,
+    angle: f32,
+    time: f32,
+) {
+    let color = color.scale_rgb(time);
+    let rotation = LayoutTransform::create_rotation(
+        0.0,
+        0.0,
+        1.0,
+        Angle::radians(2.0 * std::f32::consts::PI * angle),
+    );
+    let transform_origin = LayoutVector3D::new(
+        rect.origin.x + rect.size.width * 0.5,
+        rect.origin.y + rect.size.height * 0.5,
+        0.0,
+    );
+    let transform = rotation
+        .pre_translate(-transform_origin)
+        .post_translate(transform_origin);
+    let spatial_id = builder.push_reference_frame(
+        LayoutPoint::zero(),
+        spatial_id,
+        TransformStyle::Flat,
+        PropertyBinding::Value(transform),
+        ReferenceFrameKind::Transform,
+    );
+    builder.push_rect(
+        &CommonItemProperties::new(
+            rect,
+            SpaceAndClipInfo {
+                spatial_id,
+                clip_id: ClipId::root(root_pipeline_id),
+            },
+        ),
+        rect,
+        color,
+    );
+}
+
+fn build_display_list(
+    builder: &mut DisplayListBuilder,
+    scroll_id: ExternalScrollId,
+    root_pipeline_id: PipelineId,
+    layout_size: LayoutSize,
+    time: f32,
+    invalidations: Invalidations,
+) {
+    let size_factor = match invalidations {
+        Invalidations::Small => 0.1,
+        Invalidations::Large | Invalidations::Scrolling => 1.0,
+    };
+
+    let fixed_space_info = SpaceAndClipInfo {
+        spatial_id: SpatialId::root_scroll_node(root_pipeline_id),
+        clip_id: ClipId::root(root_pipeline_id),
+    };
+
+    let scroll_space_info = builder.define_scroll_frame(
+        &fixed_space_info,
+        Some(scroll_id),
+        LayoutRect::new(LayoutPoint::zero(), layout_size),
+        LayoutRect::new(LayoutPoint::zero(), layout_size),
+        Vec::new(),
+        None,
+        ScrollSensitivity::Script,
+        LayoutVector2D::zero(),
+    );
+
+    builder.push_rect(
+        &CommonItemProperties::new(
+            LayoutRect::new(LayoutPoint::zero(), layout_size).inflate(-10.0, -10.0),
+            fixed_space_info,
+        ),
+        LayoutRect::new(LayoutPoint::zero(), layout_size).inflate(-10.0, -10.0),
+        ColorF::new(0.8, 0.8, 0.8, 1.0),
+    );
+
+    push_rotated_rect(
+        builder,
+        LayoutRect::new(
+            LayoutPoint::new(100.0, 100.0),
+            LayoutSize::new(size_factor * 400.0, size_factor * 400.0),
+        ),
+        ColorF::new(1.0, 0.0, 0.0, 1.0),
+        scroll_space_info.spatial_id,
+        root_pipeline_id,
+        time,
+        time,
+    );
+
+    push_rotated_rect(
+        builder,
+        LayoutRect::new(
+            LayoutPoint::new(800.0, 100.0),
+            LayoutSize::new(size_factor * 100.0, size_factor * 600.0),
+        ),
+        ColorF::new(0.0, 1.0, 0.0, 1.0),
+        fixed_space_info.spatial_id,
+        root_pipeline_id,
+        0.2,
+        time,
+    );
+
+    push_rotated_rect(
+        builder,
+        LayoutRect::new(
+            LayoutPoint::new(700.0, 200.0),
+            LayoutSize::new(size_factor * 300.0, size_factor * 300.0),
+        ),
+        ColorF::new(0.0, 0.0, 1.0, 1.0),
+        scroll_space_info.spatial_id,
+        root_pipeline_id,
+        0.1,
+        time,
+    );
+}
+
+#[derive(Debug, Copy, Clone)]
+enum Invalidations {
+    Large,
+    Small,
+    Scrolling,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+enum Sync {
+    None = 0,
+    Swap = 1,
+    Commit = 2,
+    Flush = 3,
+    Query = 4,
+}
 
 fn main() {
-    // If true, use DirectComposition. If false, this will fall back to normal
-    // WR compositing of picture caching tiles, which can be used to check
-    // correctness of implementation.
-    let enable_compositor = true;
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() != 6 {
+        println!("USAGE: compositor [native|none] [small|large|scroll] [none|swap|commit|flush|query] width height");
+        process::exit(0);
+    }
+
+    let enable_compositor = match args[1].parse::<String>().unwrap().as_str() {
+        "native" => true,
+        "none" => false,
+        _ => panic!("invalid compositor [native, none]"),
+    };
+
+    let inv_mode = match args[2].parse::<String>().unwrap().as_str() {
+        "small" => Invalidations::Small,
+        "large" => Invalidations::Large,
+        "scroll" => Invalidations::Scrolling,
+        _ => panic!("invalid invalidations [small, large, scroll]"),
+    };
+
+    let sync_mode = match args[3].parse::<String>().unwrap().as_str() {
+        "none" => Sync::None,
+        "swap" => Sync::Swap,
+        "commit" => Sync::Commit,
+        "flush" => Sync::Flush,
+        "query" => Sync::Query,
+        _ => panic!("invalid sync mode [none, swap, commit, flush, query]"),
+    };
+
+    let width = args[4].parse().unwrap();
+    let height = args[5].parse().unwrap();
+    let device_size = DeviceIntSize::new(width, height);
 
     // Load GL, construct WR and the native compositor interface.
-    let device_size = DeviceIntSize::new(1024, 1024);
     let window = compositor::create_window(
         device_size.width,
         device_size.height,
         enable_compositor,
+        sync_mode as i32,
     );
     let debug_flags = DebugFlags::empty();
     let compositor_config = if enable_compositor {
@@ -199,13 +392,37 @@ fn main() {
     let device_pixel_ratio = 1.0;
     let mut current_epoch = Epoch(0);
     let root_pipeline_id = PipelineId(0, 0);
+    let layout_size = device_size.to_f32() / euclid::Scale::new(device_pixel_ratio);
+    let mut time = 0.0;
+    let scroll_id = ExternalScrollId(3, root_pipeline_id);
 
     // Kick off first transaction which will mean we get a notify below to build the DL and render.
     let mut txn = Transaction::new();
     txn.set_root_pipeline(root_pipeline_id);
+
+    if let Invalidations::Scrolling = inv_mode {
+        let mut root_builder = DisplayListBuilder::new(root_pipeline_id, layout_size);
+
+        build_display_list(
+            &mut root_builder,
+            scroll_id,
+            root_pipeline_id,
+            layout_size,
+            1.0,
+            inv_mode,
+        );
+
+        txn.set_display_list(
+            current_epoch,
+            None,
+            layout_size,
+            root_builder.finalize(),
+            true,
+        );
+    }
+
     txn.generate_frame();
     api.send_transaction(document_id, txn);
-    let mut rotation_angle = 0.0;
 
     // Tick the compositor (in this sample, we don't block on UI events)
     while compositor::tick(window) {
@@ -218,57 +435,46 @@ fn main() {
             let _ = renderer.flush_pipeline_info();
 
             // Construct a simple display list that can be drawn and composited by DC.
-            let layout_size = device_size.to_f32() / euclid::Scale::new(device_pixel_ratio);
             let mut txn = Transaction::new();
-            let mut root_builder = DisplayListBuilder::new(root_pipeline_id, layout_size);
-            let bg_rect = LayoutRect::new(LayoutPoint::new(100.0, 100.0), LayoutSize::new(800.0, 600.0));
-            root_builder.push_rect(
-                &CommonItemProperties::new(
-                    bg_rect,
-                    SpaceAndClipInfo {
-                        spatial_id: SpatialId::root_scroll_node(root_pipeline_id),
-                        clip_id: ClipId::root(root_pipeline_id),
-                    },
-                ),
-                ColorF::new(0.3, 0.3, 0.3, 1.0),
-            );
-            let rotation = LayoutTransform::create_rotation(0.0, 0.0, 1.0, Angle::degrees(rotation_angle));
-            rotation_angle += 1.0;
-            if rotation_angle > 360.0 {
-                rotation_angle = 0.0;
+
+            match inv_mode {
+                Invalidations::Small | Invalidations::Large => {
+                    let mut root_builder = DisplayListBuilder::new(root_pipeline_id, layout_size);
+
+                    build_display_list(
+                        &mut root_builder,
+                        scroll_id,
+                        root_pipeline_id,
+                        layout_size,
+                        time,
+                        inv_mode,
+                    );
+
+                    txn.set_display_list(
+                        current_epoch,
+                        None,
+                        layout_size,
+                        root_builder.finalize(),
+                        true,
+                    );
+                }
+                Invalidations::Scrolling => {
+                    let d = 0.5 - 0.5 * (2.0 * f32::consts::PI * 5.0 * time).cos();
+                    txn.scroll_node_with_id(
+                        LayoutPoint::new(0.0, (d * 100.0).round()),
+                        scroll_id,
+                        ScrollClamping::NoClamping,
+                    );
+                }
             }
-            let transform_origin = LayoutVector3D::new(400.0, 400.0, 0.0);
-            let transform = rotation.pre_translate(-transform_origin).post_translate(transform_origin);
-            let spatial_id = root_builder.push_reference_frame(
-                LayoutPoint::zero(),
-                SpatialId::root_scroll_node(root_pipeline_id),
-                TransformStyle::Flat,
-                PropertyBinding::Value(transform),
-                ReferenceFrameKind::Transform,
-            );
-            root_builder.push_rect(
-                &CommonItemProperties::new(
-                    LayoutRect::new(
-                        LayoutPoint::new(300.0, 300.0),
-                        LayoutSize::new(200.0, 200.0),
-                    ),
-                    SpaceAndClipInfo {
-                        spatial_id,
-                        clip_id: ClipId::root(root_pipeline_id),
-                    },
-                ),
-                ColorF::new(1.0, 0.0, 0.0, 1.0),
-            );
-            txn.set_display_list(
-                current_epoch,
-                None,
-                layout_size,
-                root_builder.finalize(),
-                true,
-            );
+
             txn.generate_frame();
             api.send_transaction(document_id, txn);
             current_epoch.0 += 1;
+            time += 0.001;
+            if time > 1.0 {
+                time = 0.0;
+            }
 
             // This does nothing when native compositor is enabled
             compositor::swap_buffers(window);

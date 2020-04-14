@@ -170,6 +170,15 @@ impl TexelRect {
     }
 }
 
+impl Into<TexelRect> for DeviceIntRect {
+    fn into(self) -> TexelRect {
+        TexelRect {
+            uv0: self.min().to_f32(),
+            uv1: self.max().to_f32(),
+        }
+    }
+}
+
 const MAX_AU_FLOAT: f32 = 1.0e6;
 
 pub trait AuHelpers<T> {
@@ -289,4 +298,26 @@ impl<U> RectExt for Rect<f32, U> {
     fn bottom_right(&self) -> Self::Point {
         self.max()
     }
+}
+
+// A few helpers to convert to cast between coordinate spaces that are often equivalent.
+
+#[inline]
+pub fn layout_rect_as_picture_rect(layout_rect: &LayoutRect) -> PictureRect {
+    layout_rect.cast_unit()
+}
+
+#[inline]
+pub fn layout_vector_as_picture_vector(layout_vector: LayoutVector2D) -> PictureVector2D {
+    layout_vector.cast_unit()
+}
+
+#[inline]
+pub fn device_size_as_framebuffer_size(framebuffer_size: DeviceIntSize) -> FramebufferIntSize {
+    framebuffer_size.cast_unit()
+}
+
+#[inline]
+pub fn device_rect_as_framebuffer_rect(framebuffer_rect: &DeviceIntRect) -> FramebufferIntRect {
+    framebuffer_rect.cast_unit()
 }

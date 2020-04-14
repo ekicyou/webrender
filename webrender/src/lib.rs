@@ -41,6 +41,9 @@ doesn't only contain trivial geometry, it can also store another
 [stacking_contexts]: https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_Positioning/Understanding_z_index/The_stacking_context
 */
 
+#![cfg_attr(feature = "cargo-clippy", allow(clippy::unreadable_literal, clippy::new_without_default, clippy::too_many_arguments))]
+
+
 // Cribbed from the |matches| crate, for simplicity.
 macro_rules! matches {
     ($expression:expr, $($pattern:tt)+) => {
@@ -67,7 +70,7 @@ extern crate malloc_size_of_derive;
 #[macro_use]
 extern crate serde;
 #[macro_use]
-extern crate thread_profiler;
+extern crate tracy_rs;
 
 extern crate malloc_size_of;
 extern crate svg_fmt;
@@ -81,7 +84,7 @@ mod box_shadow;
 #[cfg(any(feature = "capture", feature = "replay"))]
 mod capture;
 mod clip;
-mod clip_scroll_tree;
+mod spatial_tree;
 mod composite;
 mod debug_colors;
 mod debug_font_data;
@@ -181,7 +184,6 @@ extern crate rayon;
 extern crate ron;
 #[cfg(feature = "debugger")]
 extern crate serde_json;
-extern crate sha2;
 #[macro_use]
 extern crate smallvec;
 extern crate time;
@@ -201,7 +203,8 @@ pub extern crate api;
 extern crate webrender_build;
 
 #[doc(hidden)]
-pub use crate::composite::{CompositorConfig, Compositor, NativeSurfaceId, NativeSurfaceInfo};
+pub use crate::composite::{CompositorConfig, Compositor, CompositorCapabilities};
+pub use crate::composite::{NativeSurfaceId, NativeTileId, NativeSurfaceInfo};
 pub use crate::device::{build_shader_strings, UploadMethod, VertexUsageHint, get_gl_target};
 pub use crate::device::{ProgramBinary, ProgramCache, ProgramCacheObserver, FormatDesc};
 pub use crate::device::Device;
@@ -209,12 +212,18 @@ pub use crate::frame_builder::ChasePrimitive;
 pub use crate::prim_store::PrimitiveDebugId;
 pub use crate::profiler::{ProfilerHooks, set_profiler_hooks};
 pub use crate::renderer::{
-    AsyncPropertySampler, CpuProfile, DebugFlags, OutputImageHandler, RendererKind, ExternalImage,
-    ExternalImageHandler, ExternalImageSource, GpuProfile, GraphicsApi, GraphicsApiInfo,
-    PipelineInfo, Renderer, RendererOptions, RenderResults, RendererStats, SceneBuilderHooks,
-    ThreadListener, ShaderPrecacheFlags, MAX_VERTEX_TEXTURE_WIDTH,
+    AsyncPropertySampler, CpuProfile, DebugFlags, RendererKind, GpuProfile, GraphicsApi,
+    GraphicsApiInfo, PipelineInfo, Renderer, RendererError, RendererOptions, RenderResults,
+    RendererStats, SceneBuilderHooks, ThreadListener, ShaderPrecacheFlags,
+    MAX_VERTEX_TEXTURE_WIDTH,
 };
+pub use crate::hit_test::SharedHitTester;
+pub use crate::internal_types::FastHashMap;
 pub use crate::screen_capture::{AsyncScreenshotHandle, RecordedFrameHandle};
 pub use crate::shade::{Shaders, WrShaders};
 pub use api as webrender_api;
 pub use webrender_build::shader::ProgramSourceDigest;
+pub use crate::picture::{TileDescriptor, TileId, InvalidationReason};
+pub use crate::picture::{PrimitiveCompareResult, PrimitiveCompareResultDetail, CompareHelperResult};
+pub use crate::picture::{TileNode, TileNodeKind, TileSerializer, TileCacheInstanceSerializer, TileOffset, TileCacheLoggerUpdateLists};
+pub use crate::intern::ItemUid;

@@ -56,7 +56,7 @@ impl FontDescriptor {
             }
         } else {
             FontDescriptor::Family {
-                name: PLATFORM_DEFAULT_FACE_NAME.clone(),
+                name: PLATFORM_DEFAULT_FACE_NAME.to_string(),
             }
         }
     }
@@ -138,17 +138,17 @@ impl LocalExternalImageHandler {
     }
 }
 
-impl webrender::ExternalImageHandler for LocalExternalImageHandler {
+impl ExternalImageHandler for LocalExternalImageHandler {
     fn lock(
         &mut self,
         key: ExternalImageId,
         _channel_index: u8,
         _rendering: ImageRendering,
-    ) -> webrender::ExternalImage {
+    ) -> ExternalImage {
         let (id, desc) = self.texture_ids[key.0 as usize];
-        webrender::ExternalImage {
+        ExternalImage {
             uv: TexelRect::new(0.0, 0.0, desc.size.width as f32, desc.size.height as f32),
-            source: webrender::ExternalImageSource::NativeTexture(id),
+            source: ExternalImageSource::NativeTexture(id),
         }
     }
     fn unlock(&mut self, _key: ExternalImageId, _channel_index: u8) {}
@@ -226,7 +226,7 @@ fn generate_checkerboard_image(
     }
 
     (
-        ImageDescriptor::new(width as i32, height as i32, ImageFormat::BGRA8, true, false),
+        ImageDescriptor::new(width as i32, height as i32, ImageFormat::BGRA8, ImageDescriptorFlags::IS_OPAQUE),
         ImageData::new(pixels),
     )
 }
@@ -244,7 +244,7 @@ fn generate_xy_gradient_image(w: u32, h: u32) -> (ImageDescriptor, ImageData) {
     }
 
     (
-        ImageDescriptor::new(w as i32, h as i32, ImageFormat::BGRA8, true, false),
+        ImageDescriptor::new(w as i32, h as i32, ImageFormat::BGRA8, ImageDescriptorFlags::IS_OPAQUE),
         ImageData::new(pixels),
     )
 }
@@ -273,8 +273,13 @@ fn generate_solid_color_image(
         }
     }
 
+    let mut flags = ImageDescriptorFlags::empty();
+    if a == 255 {
+        flags |= ImageDescriptorFlags::IS_OPAQUE;
+    }
+
     (
-        ImageDescriptor::new(w as i32, h as i32, ImageFormat::BGRA8, a == 255, false),
+        ImageDescriptor::new(w as i32, h as i32, ImageFormat::BGRA8, flags),
         ImageData::new(pixels),
     )
 }
@@ -626,16 +631,16 @@ impl YamlFrameReader {
             Ok(image) => {
                 let (image_width, image_height) = image.dimensions();
                 let (format, bytes) = match image {
-                    image::ImageLuma8(_) => {
-                        (ImageFormat::R8, image.raw_pixels())
+                    image::DynamicImage::ImageLuma8(_) => {
+                        (ImageFormat::R8, image.to_bytes())
                     }
-                    image::ImageRgba8(_) => {
-                        let mut pixels = image.raw_pixels();
+                    image::DynamicImage::ImageRgba8(_) => {
+                        let mut pixels = image.to_bytes();
                         premultiply(pixels.as_mut_slice());
                         (ImageFormat::BGRA8, pixels)
                     }
-                    image::ImageRgb8(_) => {
-                        let bytes = image.raw_pixels();
+                    image::DynamicImage::ImageRgb8(_) => {
+                        let bytes = image.to_bytes();
                         let mut pixels = Vec::with_capacity(image_width as usize * image_height as usize * 4);
                         for bgr in bytes.chunks(3) {
                             pixels.extend_from_slice(&[
@@ -649,12 +654,18 @@ impl YamlFrameReader {
                     }
                     _ => panic!("We don't support whatever your crazy image type is, come on"),
                 };
+                let mut flags = ImageDescriptorFlags::empty();
+                if is_image_opaque(format, &bytes[..]) {
+                    flags |= ImageDescriptorFlags::IS_OPAQUE;
+                }
+                if self.allow_mipmaps {
+                    flags |= ImageDescriptorFlags::ALLOW_MIPMAPS;
+                }
                 let descriptor = ImageDescriptor::new(
                     image_width as i32,
                     image_height as i32,
                     format,
-                    is_image_opaque(format, &bytes[..]),
-                    self.allow_mipmaps,
+                    flags,
                 );
                 let data = ImageData::new(bytes);
                 (descriptor, data)
@@ -913,11 +924,38 @@ impl YamlFrameReader {
         dl.create_radial_gradient(center, radius, stops, extend_mode)
     }
 
+    fn to_conic_gradient(&mut self, dl: &mut DisplayListBuilder, item: &Yaml) -> ConicGradient {
+        let center = item["center"].as_point().expect("conic gradient must have center");
+        let angle = item["angle"].as_force_f32().expect("conic gradient must have an angle");
+        let stops = item["stops"]
+            .as_vec()
+            .expect("conic gradient must have stops")
+            .chunks(2)
+            .map(|chunk| {
+                GradientStop {
+                    offset: chunk[0]
+                        .as_force_f32()
+                        .expect("gradient stop offset is not f32"),
+                    color: chunk[1]
+                        .as_colorf()
+                        .expect("gradient stop color is not color"),
+                }
+            })
+            .collect::<Vec<_>>();
+        let extend_mode = if item["repeat"].as_bool().unwrap_or(false) {
+            ExtendMode::Repeat
+        } else {
+            ExtendMode::Clamp
+        };
+
+        dl.create_conic_gradient(center, angle, stops, extend_mode)
+    }
+
     fn handle_rect(
         &mut self,
         dl: &mut DisplayListBuilder,
         item: &Yaml,
-        info: &mut CommonItemProperties,
+        info: &CommonItemProperties,
     ) {
         let bounds_key = if item["type"].is_badvalue() {
             "rect"
@@ -925,26 +963,19 @@ impl YamlFrameReader {
             "bounds"
         };
 
-        info.clip_rect = try_intersect!(
-            self.resolve_rect(&item[bounds_key]),
-            &info.clip_rect
-        );
-
+        let bounds = self.resolve_rect(&item[bounds_key]);
         let color = self.resolve_colorf(&item["color"], ColorF::BLACK);
-        dl.push_rect(&info, color);
+        dl.push_rect(&info, bounds, color);
     }
 
     fn handle_clear_rect(
         &mut self,
         dl: &mut DisplayListBuilder,
         item: &Yaml,
-        info: &mut CommonItemProperties,
+        info: &CommonItemProperties,
     ) {
-        info.clip_rect = try_intersect!(
-            item["bounds"].as_rect().expect("clear-rect type must have bounds"),
-            &info.clip_rect
-        );
-        dl.push_clear_rect(&info);
+        let bounds = item["bounds"].as_rect().expect("clear-rect type must have bounds");
+        dl.push_clear_rect(&info, bounds);
     }
 
     fn handle_hit_test(
@@ -1078,6 +1109,33 @@ impl YamlFrameReader {
         );
     }
 
+    fn handle_conic_gradient(
+        &mut self,
+        dl: &mut DisplayListBuilder,
+        item: &Yaml,
+        info: &mut CommonItemProperties,
+    ) {
+        let bounds_key = if item["type"].is_badvalue() {
+            "conic-gradient"
+        } else {
+            "bounds"
+        };
+        let bounds = item[bounds_key]
+            .as_rect()
+            .expect("conic gradient must have bounds");
+        let gradient = self.to_conic_gradient(dl, item);
+        let tile_size = item["tile-size"].as_size().unwrap_or(bounds.size);
+        let tile_spacing = item["tile-spacing"].as_size().unwrap_or(LayoutSize::zero());
+
+        dl.push_conic_gradient(
+            &info,
+            bounds,
+            gradient,
+            tile_size,
+            tile_spacing,
+        );
+    }
+
     fn handle_border(
         &mut self,
         dl: &mut DisplayListBuilder,
@@ -1156,7 +1214,7 @@ impl YamlFrameReader {
                         do_aa,
                     }))
                 }
-                "image" | "gradient" | "radial-gradient" => {
+                "image" | "gradient" | "radial-gradient" | "conic-gradient" => {
                     let image_width = item["image-width"]
                         .as_i64()
                         .unwrap_or(bounds.size.width as i64);
@@ -1209,7 +1267,10 @@ impl YamlFrameReader {
                         "radial-gradient" => {
                             let gradient = self.to_radial_gradient(dl, item);
                             NinePatchBorderSource::RadialGradient(gradient)
-
+                        }
+                        "conic-gradient" => {
+                            let gradient = self.to_conic_gradient(dl, item);
+                            NinePatchBorderSource::ConicGradient(gradient)
                         }
                         _ => unreachable!("Unexpected border type"),
                     };
@@ -1581,6 +1642,7 @@ impl YamlFrameReader {
             "border",
             "gradient",
             "radial-gradient",
+            "conic-gradient"
         ];
 
         for shorthand in shorthands.iter() {
@@ -1655,6 +1717,20 @@ impl YamlFrameReader {
                     flags.remove(PrimitiveFlags::IS_BACKFACE_VISIBLE);
                 }
             }
+            if let Some(is_scrollbar_container) = item["scrollbar-container"].as_bool() {
+                if is_scrollbar_container {
+                    flags.insert(PrimitiveFlags::IS_SCROLLBAR_CONTAINER);
+                } else {
+                    flags.remove(PrimitiveFlags::IS_SCROLLBAR_CONTAINER);
+                }
+            }
+            if let Some(prefer_compositor_surface) = item["prefer-compositor-surface"].as_bool() {
+                if prefer_compositor_surface {
+                    flags.insert(PrimitiveFlags::PREFER_COMPOSITOR_SURFACE);
+                } else {
+                    flags.remove(PrimitiveFlags::PREFER_COMPOSITOR_SURFACE);
+                }
+            }
 
             let mut info = CommonItemProperties {
                 clip_rect,
@@ -1679,6 +1755,7 @@ impl YamlFrameReader {
                 "border" => self.handle_border(dl, wrench, item, &mut info),
                 "gradient" => self.handle_gradient(dl, item, &mut info),
                 "radial-gradient" => self.handle_radial_gradient(dl, item, &mut info),
+                "conic-gradient" => self.handle_conic_gradient(dl, item, &mut info),
                 "box-shadow" => self.handle_box_shadow(dl, item, &mut info),
                 "iframe" => self.handle_iframe(dl, item, &mut info),
                 "stacking-context" => {

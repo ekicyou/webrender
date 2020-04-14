@@ -168,6 +168,7 @@ impl Rectangle {
                     clip_id,
                 },
             ),
+            rect,
             self.color,
         );
 

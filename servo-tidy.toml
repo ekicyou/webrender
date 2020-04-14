@@ -6,29 +6,28 @@ check-alphabetical-order = false
 [ignore]
 # Ignored packages with duplicated versions
 packages = [
+    "core-foundation",
+    "core-foundation-sys",
     "core-graphics",
-    "core-text",
-    "crossbeam-utils",
     "gl_generator",
-    "lazy_static",
-    "percent-encoding",
+    "gleam",
     "rand",
     "rand_core",
+    # https://github.com/trimental/andrew/issues/5
+    "rusttype",
+    # https://bugzilla.mozilla.org/show_bug.cgi?id=1615148
+    "smallvec",
     "winapi",
     "yaml-rust",
-
     # These are tracked in bug 1587468, see there for pending work.
     "proc-macro2",
     "quote",
-    "syn",
     "unicode-xid",
 ]
 
 # Files that are ignored for all tidy and lint checks.
 files = [
     "./wrench/src/egl.rs",  # Copied from glutin
-    "./ci-scripts/wrupdater/converter.py",  # servo-tidy doesn't like python3
-    "./ci-scripts/wrupdater/read-json.py",  # servo-tidy doesn't like python3
 ]
 
 # Many directories are currently ignored while we tidy things up

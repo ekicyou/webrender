@@ -14,7 +14,7 @@ flat varying ivec4 vData;
 flat varying vec4 vFilterData0;
 flat varying vec4 vFilterData1;
 flat varying float vFloat0;
-flat varying mat3 vColorMat;
+flat varying mat4 vColorMat;
 flat varying int vFuncs[4];
 
 #define FILTER_BLEND                0
@@ -39,13 +39,13 @@ flat varying int vFuncs[4];
 
 #ifdef WR_VERTEX_SHADER
 
-in int aFilterRenderTaskAddress;
-in int aFilterInput1TaskAddress;
-in int aFilterInput2TaskAddress;
-in int aFilterKind;
-in int aFilterInputCount;
-in int aFilterGenericInt;
-in ivec2 aFilterExtraDataAddress;
+PER_INSTANCE in int aFilterRenderTaskAddress;
+PER_INSTANCE in int aFilterInput1TaskAddress;
+PER_INSTANCE in int aFilterInput2TaskAddress;
+PER_INSTANCE in int aFilterKind;
+PER_INSTANCE in int aFilterInputCount;
+PER_INSTANCE in int aFilterGenericInt;
+PER_INSTANCE in ivec2 aFilterExtraDataAddress;
 
 struct FilterTask {
     RenderTaskCommonData common_data;
@@ -131,8 +131,8 @@ void main(void) {
             vFloat0 = filter_task.user_data.x;
             break;
         case FILTER_COLOR_MATRIX:
-            vec4 mat_data[3] = fetch_from_gpu_cache_3_direct(aFilterExtraDataAddress);
-            vColorMat = mat3(mat_data[0].xyz, mat_data[1].xyz, mat_data[2].xyz);
+            vec4 mat_data[4] = fetch_from_gpu_cache_4_direct(aFilterExtraDataAddress);
+            vColorMat = mat4(mat_data[0], mat_data[1], mat_data[2], mat_data[3]);
             vFilterData0 = fetch_from_gpu_cache_1_direct(aFilterExtraDataAddress + ivec2(4, 0));
             break;
         case FILTER_DROP_SHADOW:
@@ -509,7 +509,7 @@ vec4 composite(vec4 Cs, vec4 Cb, int mode) {
 
 vec4 sampleInUvRect(sampler2DArray sampler, vec3 uv, vec4 uvRect) {
     vec2 clamped = clamp(uv.xy, uvRect.xy, uvRect.zw);
-    return texture(sampler, vec3(clamped, uv.z), 0.0);
+    return texture(sampler, vec3(clamped, uv.z));
 }
 
 void main(void) {
@@ -554,8 +554,8 @@ void main(void) {
             result.a = Ca.a * vFloat0;
             break;
         case FILTER_COLOR_MATRIX:
-            result.rgb = vColorMat * Ca.rgb + vFilterData0.rgb;
-            result.a = Ca.a;
+            result = vColorMat * Ca + vFilterData0;
+            result = clamp(result, vec4(0.0), vec4(1.0));
             break;
         case FILTER_DROP_SHADOW:
             vec4 shadow = vec4(vFilterData0.rgb, Cb.a * vFilterData0.a);

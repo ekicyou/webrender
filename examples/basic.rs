@@ -203,7 +203,7 @@ impl Example for App {
         let image_mask_key = api.generate_image_key();
         txn.add_image(
             image_mask_key,
-            ImageDescriptor::new(2, 2, ImageFormat::R8, true, false),
+            ImageDescriptor::new(2, 2, ImageFormat::R8, ImageDescriptorFlags::IS_OPAQUE),
             ImageData::new(vec![0, 80, 180, 255]),
             None,
         );
@@ -229,6 +229,7 @@ impl Example for App {
                 (100, 100).to(200, 200),
                 SpaceAndClipInfo { spatial_id, clip_id },
             ),
+            (100, 100).to(200, 200),
             ColorF::new(0.0, 1.0, 0.0, 1.0),
         );
 
@@ -237,6 +238,7 @@ impl Example for App {
                 (250, 100).to(350, 200),
                 SpaceAndClipInfo { spatial_id, clip_id },
             ),
+            (250, 100).to(350, 200),
             ColorF::new(0.0, 1.0, 0.0, 1.0),
         );
         let border_side = BorderSide {
