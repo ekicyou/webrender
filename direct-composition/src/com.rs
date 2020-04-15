@@ -20,7 +20,7 @@ fn panic_com(hresult: HRESULT) -> ! {
     panic!("COM error 0x{:08X}", hresult as u32)
 }
 
-type WinResult<T> = Result<T, HRESULT>;
+pub type WinResult<T> = Result<T, HRESULT>;
 
 /// hresultの確認api
 pub trait CheckHResult: Sized {
