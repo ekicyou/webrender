@@ -25,9 +25,9 @@ mod egl;
 
 /// 合成ターゲット（ルート）
 pub struct CompositionRoot {
-    #[allow(unused)]  // Needs to be kept alive
+    #[allow(unused)] // Needs to be kept alive
     target: ComPtr<IDCompositionTarget>,
-    #[allow(unused)]  // Needs to be kept alive
+    #[allow(unused)] // Needs to be kept alive
     visual: ComPtr<IDCompositionVisual>,
 }
 
@@ -41,9 +41,9 @@ pub struct CompositionWindow {
 
     composition_device: ComPtr<IDCompositionDevice>,
 
-    #[allow(unused)]  // Needs to be kept alive
+    #[allow(unused)] // Needs to be kept alive
     front: CompositionRoot,
-    #[allow(unused)]  // Needs to be kept alive
+    #[allow(unused)] // Needs to be kept alive
     back: CompositionRoot,
 }
 
@@ -55,23 +55,25 @@ impl CompositionWindow {
     /// `hwnd` ウィンドウハンドル
     pub unsafe fn new(hwnd: HWND) -> Self {
         // D3Dデバイスの取得
-        let d3d_device = ComPtr::new_with(|ptr_ptr| winapi::um::d3d11::D3D11CreateDevice(
-            ptr::null_mut(),
-            winapi::um::d3dcommon::D3D_DRIVER_TYPE_HARDWARE,
-            ptr::null_mut(),
-            winapi::um::d3d11::D3D11_CREATE_DEVICE_BGRA_SUPPORT |
-            if cfg!(debug_assertions) {
-                winapi::um::d3d11::D3D11_CREATE_DEVICE_DEBUG
-            } else {
-                0
-            },
-            ptr::null_mut(),
-            0,
-            winapi::um::d3d11::D3D11_SDK_VERSION,
-            ptr_ptr,
-            &mut 0,
-            ptr::null_mut(),
-        ));
+        let d3d_device = ComPtr::new_with(|ptr_ptr| {
+            winapi::um::d3d11::D3D11CreateDevice(
+                ptr::null_mut(),
+                winapi::um::d3dcommon::D3D_DRIVER_TYPE_HARDWARE,
+                ptr::null_mut(),
+                winapi::um::d3d11::D3D11_CREATE_DEVICE_BGRA_SUPPORT
+                    | if cfg!(debug_assertions) {
+                        winapi::um::d3d11::D3D11_CREATE_DEVICE_DEBUG
+                    } else {
+                        0
+                    },
+                ptr::null_mut(),
+                0,
+                winapi::um::d3d11::D3D11_SDK_VERSION,
+                ptr_ptr,
+                &mut 0,
+                ptr::null_mut(),
+            )
+        });
 
         // D3Dデバイスに紐づいたGLデバイスの作成
         let egl = egl::SharedEglThings::new(d3d_device.as_raw());
@@ -94,38 +96,41 @@ impl CompositionWindow {
 
         // 合成ターゲットの取得（前面）
         let front = {
-            let topmost = TRUE;  // 前面
+            let topmost = TRUE; // 前面
             let target = ComPtr::new_with(|ptr_ptr| {
-                composition_device.CreateTargetForHwnd(hwnd, topmost, ptr_ptr)});
+                composition_device.CreateTargetForHwnd(hwnd, topmost, ptr_ptr)
+            });
             let visual = ComPtr::new_with(|ptr_ptr| composition_device.CreateVisual(ptr_ptr));
             target.SetRoot(&*visual).check_hresult();
-            CompositionRoot{target, visual,}
+            CompositionRoot { target, visual }
         };
 
         // 合成ターゲットの取得（背面）
         let back = {
-            let topmost = FALSE;  // 背面
+            let topmost = FALSE; // 背面
             let target = ComPtr::new_with(|ptr_ptr| {
-                composition_device.CreateTargetForHwnd(hwnd, topmost, ptr_ptr)});
+                composition_device.CreateTargetForHwnd(hwnd, topmost, ptr_ptr)
+            });
             let visual = ComPtr::new_with(|ptr_ptr| composition_device.CreateVisual(ptr_ptr));
             target.SetRoot(&*visual).check_hresult();
-            CompositionRoot{target, visual,}
+            CompositionRoot { target, visual }
         };
 
         // 戻り値
         CompositionWindow {
-            d3d_device, dxgi_factory,
-            egl, gleam,
+            d3d_device,
+            dxgi_factory,
+            egl,
+            gleam,
             composition_device,
-            front, back,
+            front,
+            back,
         }
     }
 
     /// シーンの確定
     pub fn commit(&self) {
-        unsafe {
-            self.composition_device.Commit().check_hresult()
-        }
+        unsafe { self.composition_device.Commit().check_hresult() }
     }
 
     pub fn create_angle_visual(&self, topmost: bool, width: u32, height: u32) -> AngleVisual {
@@ -143,29 +148,38 @@ impl CompositionWindow {
                 BufferCount: 2,
                 Scaling: winapi::shared::dxgi1_2::DXGI_SCALING_STRETCH,
                 SwapEffect: winapi::shared::dxgi::DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-                AlphaMode:  winapi::shared::dxgi1_2::DXGI_ALPHA_MODE_PREMULTIPLIED,
+                AlphaMode: winapi::shared::dxgi1_2::DXGI_ALPHA_MODE_PREMULTIPLIED,
                 Flags: 0,
             };
-            let swap_chain = ComPtr::<winapi::shared::dxgi1_2::IDXGISwapChain1>::new_with(|ptr_ptr| {
-                self.dxgi_factory.CreateSwapChainForComposition(
-                    as_ptr(&self.d3d_device),
-                    &desc,
-                    ptr::null_mut(),
-                    ptr_ptr,
-                )
-            });
-            let back_buffer = ComPtr::<winapi::um::d3d11::ID3D11Texture2D>::new_with_uuid(|uuid, ptr_ptr| {
-                swap_chain.GetBuffer(0, uuid, ptr_ptr)
-            });
+            let swap_chain =
+                ComPtr::<winapi::shared::dxgi1_2::IDXGISwapChain1>::new_with(|ptr_ptr| {
+                    self.dxgi_factory.CreateSwapChainForComposition(
+                        as_ptr(&self.d3d_device),
+                        &desc,
+                        ptr::null_mut(),
+                        ptr_ptr,
+                    )
+                });
+            let back_buffer =
+                ComPtr::<winapi::um::d3d11::ID3D11Texture2D>::new_with_uuid(|uuid, ptr_ptr| {
+                    swap_chain.GetBuffer(0, uuid, ptr_ptr)
+                });
             let egl = egl::PerVisualEglThings::new(self.egl.clone(), &*back_buffer, width, height);
             let gleam = self.gleam.clone();
 
             let visual = ComPtr::new_with(|ptr_ptr| self.composition_device.CreateVisual(ptr_ptr));
             visual.SetContent(&*****swap_chain).check_hresult();
             let root = if topmost { &self.front } else { &self.back };
-            root.visual.AddVisual(&*visual, FALSE, ptr::null_mut()).check_hresult();
+            root.visual
+                .AddVisual(&*visual, FALSE, ptr::null_mut())
+                .check_hresult();
 
-            AngleVisual { visual, swap_chain, egl, gleam }
+            AngleVisual {
+                visual,
+                swap_chain,
+                egl,
+                gleam,
+            }
         }
     }
 }
@@ -181,15 +195,11 @@ pub struct AngleVisual {
 
 impl AngleVisual {
     pub fn set_offset_x(&self, offset_x: f32) {
-        unsafe {
-            self.visual.SetOffsetX_1(offset_x).check_hresult()
-        }
+        unsafe { self.visual.SetOffsetX_1(offset_x).check_hresult() }
     }
 
     pub fn set_offset_y(&self, offset_y: f32) {
-        unsafe {
-            self.visual.SetOffsetY_1(offset_y).check_hresult()
-        }
+        unsafe { self.visual.SetOffsetY_1(offset_y).check_hresult() }
     }
 
     pub fn make_current(&self) {
@@ -198,8 +208,6 @@ impl AngleVisual {
 
     pub fn present(&self) {
         self.gleam.finish();
-        unsafe {
-            self.swap_chain.Present(0, 0).check_hresult()
-        }
+        unsafe { self.swap_chain.Present(0, 0).check_hresult() }
     }
 }
